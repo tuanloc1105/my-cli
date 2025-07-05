@@ -2,10 +2,10 @@ package main
 
 import (
 	"bufio"
+	"common-module/utils"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -494,16 +494,7 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 			}
 
 			// Clear screen
-			fmt.Print("\033[H\033[2J") // Clear screen
-			var command *exec.Cmd
-			if runtime.GOOS == "windows" {
-				command = exec.Command("cls")
-			} else {
-				command = exec.Command("clear")
-			}
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
-			command.Run()
+			utils.CLS()
 
 			fmt.Printf("%s%sEnhanced File and Directory Finder%s\n", ColorBold, ColorHeader, ColorEndC)
 			fmt.Printf("%sSearching in: %s%s\n", ColorOKBlue, basePath, ColorEndC)

@@ -1,12 +1,11 @@
 package main
 
 import (
+	"common-module/utils"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -274,16 +273,7 @@ func main() {
 
 			// Clear screen unless disabled
 			if !noClear {
-				fmt.Print("\033[H\033[2J") // Clear screen
-				var command *exec.Cmd
-				if runtime.GOOS == "windows" {
-					command = exec.Command("cls")
-				} else {
-					command = exec.Command("clear")
-				}
-				command.Stdout = os.Stdout
-				command.Stderr = os.Stderr
-				command.Run()
+				utils.CLS() // Clear screen
 			}
 
 			// Validate path

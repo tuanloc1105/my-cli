@@ -1,11 +1,9 @@
 package main
 
 import (
+	"common-module/utils"
 	"fmt"
 	"os"
-	"os/exec"
-	"regexp"
-	"runtime"
 	"strings"
 	"unicode"
 
@@ -101,14 +99,26 @@ func (cc *CaseConverter) FromSnakeCase(s string) string {
 
 // FromPascalCase converts PascalCase to normal text
 func (cc *CaseConverter) FromPascalCase(s string) string {
-	re := regexp.MustCompile(`(?m)(?<!^)(?=[A-Z])`)
-	return re.ReplaceAllString(s, " ")
+	var result strings.Builder
+	for i, char := range s {
+		if i > 0 && unicode.IsUpper(char) {
+			result.WriteRune(' ')
+		}
+		result.WriteRune(char)
+	}
+	return result.String()
 }
 
 // FromCamelCase converts camelCase to normal text
 func (cc *CaseConverter) FromCamelCase(s string) string {
-	re := regexp.MustCompile(`(?m)(?<!^)(?=[A-Z])`)
-	return re.ReplaceAllString(s, " ")
+	var result strings.Builder
+	for i, char := range s {
+		if i > 0 && unicode.IsUpper(char) {
+			result.WriteRune(' ')
+		}
+		result.WriteRune(char)
+	}
+	return result.String()
 }
 
 // FromKebabCase converts kebab-case to normal text
@@ -203,7 +213,6 @@ func PrintConversions(line string) {
 }
 
 var (
-	text   string
 	file   string
 	all    bool
 	format string
@@ -229,16 +238,7 @@ Examples:
   case-converter "hello world" --format snake`,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Clear screen
-			fmt.Print("\033[H\033[2J") // Clear screen
-			var command *exec.Cmd
-			if runtime.GOOS == "windows" {
-				command = exec.Command("cls")
-			} else {
-				command = exec.Command("clear")
-			}
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
-			command.Run()
+			utils.CLS()
 
 			var inputText string
 			if file != "" {
