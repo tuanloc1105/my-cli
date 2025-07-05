@@ -221,15 +221,15 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 
 	// Count total directories for progress tracking
 	totalDirs := 0
-	filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() && !ff.shouldExclude(path) {
-			totalDirs++
-		}
-		return nil
-	})
+	// filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
+	// 	if err != nil {
+	// 		return nil
+	// 	}
+	// 	if d.IsDir() && !ff.shouldExclude(path) {
+	// 		totalDirs++
+	// 	}
+	// 	return nil
+	// })
 
 	ff.progressTracker.SetTotalDirs(totalDirs)
 
