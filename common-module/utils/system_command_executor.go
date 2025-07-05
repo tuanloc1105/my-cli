@@ -15,7 +15,11 @@ func CLS() {
 	case "linux":
 		cmd = exec.Command("clear") //Linux example, its tested
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "cls") //Windows example, its tested
+		if os.Getenv("PROMPT") != "" {
+			cmd = exec.Command("cmd", "/c", "cls") //Windows example, its tested
+		} else {
+			cmd = exec.Command("pwsh", "-Command", "Clear-Host")
+		}
 	default:
 		fmt.Println("CLS for ", runtime.GOOS, " not implemented")
 		return
@@ -32,7 +36,11 @@ func Shellout(command string) (string, string, int, error) {
 	case "linux":
 		cmd = exec.Command("bash", "-c", command)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", command)
+		if os.Getenv("PROMPT") != "" {
+			cmd = exec.Command("cmd", "/c", command)
+		} else {
+			cmd = exec.Command("pwsh", "-Command", command)
+		}
 	default:
 		return "", "", 130, fmt.Errorf("%s not implemented", runtime.GOOS)
 	}

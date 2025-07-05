@@ -24,6 +24,7 @@ Find and replace text in files or directories with automatic backup creation and
 ### Prerequisites
 - Go 1.21 or later
 - Git (for cloning)
+- [Powershell 7](https://github.com/PowerShell/PowerShell) - required only if you run these tools in Windows PowerShell. Ignore if you're using Command Prompt.
 
 ### Installation
 
