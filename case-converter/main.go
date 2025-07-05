@@ -8,14 +8,24 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // CaseConverter contains all text transformation methods
 type CaseConverter struct{}
 
+// Global instances to avoid repeated allocations
+var (
+	globalCaseConverter = &CaseConverter{}
+	globalColorOutput   = &ColorOutput{}
+	titleCaser          = cases.Title(language.English)
+)
+
 // RemoveNonAlpha removes non-alphabetic characters from a string, keeping whitespace and alphanumeric
 func (cc *CaseConverter) RemoveNonAlpha(s string) string {
 	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
 	for _, char := range s {
 		if unicode.IsLetter(char) || unicode.IsSpace(char) || unicode.IsNumber(char) {
 			result.WriteRune(char)
@@ -32,12 +42,25 @@ func (cc *CaseConverter) ToSnakeCase(s string) string {
 // ToPascalCase converts string to PascalCase
 func (cc *CaseConverter) ToPascalCase(s string) string {
 	words := strings.Fields(s)
-	for i, word := range words {
+	if len(words) == 0 {
+		return s
+	}
+
+	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
+
+	for _, word := range words {
 		if len(word) > 0 {
-			words[i] = strings.ToUpper(word[:1]) + strings.ToLower(word[1:])
+			if result.Len() > 0 {
+				result.WriteString(strings.ToUpper(word[:1]))
+				result.WriteString(strings.ToLower(word[1:]))
+			} else {
+				result.WriteString(strings.ToUpper(word[:1]))
+				result.WriteString(strings.ToLower(word[1:]))
+			}
 		}
 	}
-	return strings.Join(words, "")
+	return result.String()
 }
 
 // ToKebabCase converts string to kebab-case
@@ -61,24 +84,45 @@ func (cc *CaseConverter) ToCamelCase(s string) string {
 	if len(words) == 0 {
 		return s
 	}
-	result := strings.ToLower(words[0])
+
+	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
+
+	// First word in lowercase
+	if len(words[0]) > 0 {
+		result.WriteString(strings.ToLower(words[0]))
+	}
+
+	// Subsequent words with first letter uppercase
 	for i := 1; i < len(words); i++ {
 		if len(words[i]) > 0 {
-			result += strings.ToUpper(words[i][:1]) + strings.ToLower(words[i][1:])
+			result.WriteString(strings.ToUpper(words[i][:1]))
+			result.WriteString(strings.ToLower(words[i][1:]))
 		}
 	}
-	return result
+	return result.String()
 }
 
 // ToTitleCase converts string to Title Case
 func (cc *CaseConverter) ToTitleCase(s string) string {
 	words := strings.Fields(s)
+	if len(words) == 0 {
+		return s
+	}
+
+	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
+
 	for i, word := range words {
+		if i > 0 {
+			result.WriteByte(' ')
+		}
 		if len(word) > 0 {
-			words[i] = strings.ToUpper(word[:1]) + strings.ToLower(word[1:])
+			result.WriteString(strings.ToUpper(word[:1]))
+			result.WriteString(strings.ToLower(word[1:]))
 		}
 	}
-	return strings.Join(words, " ")
+	return result.String()
 }
 
 // ToDotCase converts string to dot.case
@@ -89,20 +133,37 @@ func (cc *CaseConverter) ToDotCase(s string) string {
 // FromSnakeCase converts snake_case to normal text
 func (cc *CaseConverter) FromSnakeCase(s string) string {
 	words := strings.Split(s, "_")
+	if len(words) == 0 {
+		return s
+	}
+
+	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
+
 	for i, word := range words {
+		if i > 0 {
+			result.WriteByte(' ')
+		}
 		if len(word) > 0 {
-			words[i] = strings.ToUpper(word[:1]) + strings.ToLower(word[1:])
+			result.WriteString(strings.ToUpper(word[:1]))
+			result.WriteString(strings.ToLower(word[1:]))
 		}
 	}
-	return strings.Join(words, " ")
+	return result.String()
 }
 
 // FromPascalCase converts PascalCase to normal text
 func (cc *CaseConverter) FromPascalCase(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+
 	var result strings.Builder
+	result.Grow(len(s) + 10) // Pre-allocate capacity with some extra space
+
 	for i, char := range s {
 		if i > 0 && unicode.IsUpper(char) {
-			result.WriteRune(' ')
+			result.WriteByte(' ')
 		}
 		result.WriteRune(char)
 	}
@@ -111,10 +172,16 @@ func (cc *CaseConverter) FromPascalCase(s string) string {
 
 // FromCamelCase converts camelCase to normal text
 func (cc *CaseConverter) FromCamelCase(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+
 	var result strings.Builder
+	result.Grow(len(s) + 10) // Pre-allocate capacity with some extra space
+
 	for i, char := range s {
 		if i > 0 && unicode.IsUpper(char) {
-			result.WriteRune(' ')
+			result.WriteByte(' ')
 		}
 		result.WriteRune(char)
 	}
@@ -124,12 +191,23 @@ func (cc *CaseConverter) FromCamelCase(s string) string {
 // FromKebabCase converts kebab-case to normal text
 func (cc *CaseConverter) FromKebabCase(s string) string {
 	words := strings.Split(s, "-")
+	if len(words) == 0 {
+		return s
+	}
+
+	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
+
 	for i, word := range words {
+		if i > 0 {
+			result.WriteByte(' ')
+		}
 		if len(word) > 0 {
-			words[i] = strings.ToUpper(word[:1]) + strings.ToLower(word[1:])
+			result.WriteString(strings.ToUpper(word[:1]))
+			result.WriteString(strings.ToLower(word[1:]))
 		}
 	}
-	return strings.Join(words, " ")
+	return result.String()
 }
 
 // ColorOutput provides colored terminal output
@@ -145,49 +223,118 @@ func (co *ColorOutput) Blue(msg string) string {
 	return fmt.Sprintf("\033[44m\033[1;30m %s \033[0m", msg)
 }
 
+// detectCaseType detects the input case type to avoid unnecessary conversions
+func detectCaseType(text string) string {
+	if strings.Contains(text, " ") {
+		return "normal"
+	}
+	if strings.Contains(text, "_") {
+		return "snake"
+	}
+	if strings.Contains(text, "-") {
+		return "kebab"
+	}
+	if strings.Contains(text, ".") {
+		return "dot"
+	}
+	if strings.Contains(text, "/") {
+		return "path"
+	}
+	// Check for camelCase or PascalCase
+	for i, char := range text {
+		if i > 0 && unicode.IsUpper(char) {
+			return "camel_or_pascal"
+		}
+	}
+	return "unknown"
+}
+
+// normalizeText optimizes text normalization based on detected case type
+func normalizeText(text string) string {
+	caseType := detectCaseType(text)
+
+	switch caseType {
+	case "normal":
+		return text
+	case "snake":
+		return globalCaseConverter.FromSnakeCase(text)
+	case "kebab":
+		return globalCaseConverter.FromKebabCase(text)
+	case "dot":
+		return strings.ReplaceAll(text, ".", " ")
+	case "path":
+		return strings.ReplaceAll(text, "/", " ")
+	case "camel_or_pascal":
+		// Try camel case first, then pascal
+		result := globalCaseConverter.FromCamelCase(text)
+		if result != text {
+			return result
+		}
+		return globalCaseConverter.FromPascalCase(text)
+	default:
+		// Try all conversions as fallback
+		result := globalCaseConverter.FromCamelCase(text)
+		if result != text {
+			return result
+		}
+		result = globalCaseConverter.FromSnakeCase(text)
+		if result != text {
+			return result
+		}
+		result = globalCaseConverter.FromKebabCase(text)
+		if result != text {
+			return result
+		}
+		return globalCaseConverter.FromPascalCase(text)
+	}
+}
+
 // ProcessCaseConversions processes text and returns all case conversions
 func ProcessCaseConversions(text string) map[string]string {
-	cc := &CaseConverter{}
-
-	// Handle potential all-caps input by checking for spaces
-	var normalized string
-	if strings.Contains(text, " ") {
-		normalized = text
-	} else {
-		// If no spaces, then apply from_pascal_case and others
-		normalized = text
-		normalized = cc.FromCamelCase(normalized)
-		normalized = cc.FromSnakeCase(normalized)
-		normalized = cc.FromKebabCase(normalized)
-		normalized = cc.FromPascalCase(normalized)
-	}
+	// Normalize text efficiently
+	normalized := normalizeText(text)
 
 	// Clean up the text
 	words := strings.Fields(strings.TrimSpace(normalized))
-	cleanText := cc.RemoveNonAlpha(strings.Join(words, " "))
+	cleanText := globalCaseConverter.RemoveNonAlpha(strings.Join(words, " "))
 	cleanText = strings.ToLower(cleanText)
 
-	return map[string]string{
-		"normal":        cleanText,
-		"upper":         strings.ToUpper(cleanText),
-		"lower":         strings.ToLower(cleanText),
-		"capitalized":   strings.ToUpper(cleanText[:1]) + strings.ToLower(cleanText[1:]),
-		"swapped":       swapCase(cleanText),
-		"snake_case":    cc.ToSnakeCase(cleanText),
-		"kebab_case":    cc.ToKebabCase(cleanText),
-		"camel_case":    cc.ToCamelCase(cleanText),
-		"pascal_case":   cc.ToPascalCase(cleanText),
-		"constant_case": cc.ToConstantCase(cleanText),
-		"title_case":    cc.ToTitleCase(cleanText),
-		"dot_case":      cc.ToDotCase(cleanText),
-		"path_case":     cc.ToPathCase(cleanText),
-		"pascal_kebab":  strings.ReplaceAll(cc.ToTitleCase(cleanText), " ", "-"),
+	if len(cleanText) == 0 {
+		cleanText = strings.ToLower(strings.TrimSpace(text))
 	}
+
+	// Pre-allocate the result map
+	result := make(map[string]string, 13)
+
+	// Use cached instances and avoid repeated allocations
+	result["normal"] = cleanText
+	result["upper"] = strings.ToUpper(cleanText)
+	result["lower"] = strings.ToLower(cleanText)
+
+	if len(cleanText) > 0 {
+		result["capitalized"] = strings.ToUpper(cleanText[:1]) + strings.ToLower(cleanText[1:])
+	} else {
+		result["capitalized"] = cleanText
+	}
+
+	result["swapped"] = swapCase(cleanText)
+	result["snake_case"] = globalCaseConverter.ToSnakeCase(cleanText)
+	result["kebab_case"] = globalCaseConverter.ToKebabCase(cleanText)
+	result["camel_case"] = globalCaseConverter.ToCamelCase(cleanText)
+	result["pascal_case"] = globalCaseConverter.ToPascalCase(cleanText)
+	result["constant_case"] = globalCaseConverter.ToConstantCase(cleanText)
+	result["title_case"] = globalCaseConverter.ToTitleCase(cleanText)
+	result["dot_case"] = globalCaseConverter.ToDotCase(cleanText)
+	result["path_case"] = globalCaseConverter.ToPathCase(cleanText)
+	result["pascal_kebab"] = strings.ReplaceAll(globalCaseConverter.ToTitleCase(cleanText), " ", "-")
+
+	return result
 }
 
 // swapCase swaps the case of each character
 func swapCase(s string) string {
 	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
 	for _, char := range s {
 		if unicode.IsUpper(char) {
 			result.WriteRune(unicode.ToLower(char))
@@ -200,15 +347,24 @@ func swapCase(s string) string {
 	return result.String()
 }
 
+// Pre-defined sorted keys to avoid sorting every time
+var sortedKeys = []string{
+	"normal", "upper", "lower", "capitalized", "swapped",
+	"snake_case", "kebab_case", "camel_case", "pascal_case",
+	"constant_case", "title_case", "dot_case", "path_case", "pascal_kebab",
+}
+
 // PrintConversions prints all case conversions for a given line
 func PrintConversions(line string) {
-	co := &ColorOutput{}
-	fmt.Printf("\n%s: %s\n", co.Blue("Original"), line)
+	fmt.Printf("\n%s: %s\n", globalColorOutput.Blue("Original"), line)
 	conversions := ProcessCaseConversions(line)
-	for formatName, converted := range conversions {
-		displayName := strings.ReplaceAll(formatName, "_", " ")
-		displayName = strings.Title(displayName)
-		fmt.Printf("%s: %s\n", co.Green(displayName), converted)
+
+	for _, formatName := range sortedKeys {
+		if converted, exists := conversions[formatName]; exists {
+			displayName := strings.ReplaceAll(formatName, "_", " ")
+			displayName = titleCaser.String(displayName)
+			fmt.Printf("%s: %s\n", globalColorOutput.Green(displayName), converted)
+		}
 	}
 }
 
