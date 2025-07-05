@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -45,7 +47,7 @@ func shouldExclude(name string, excludeList []string) bool {
 	return false
 }
 
-func getFolderSize(folderPath string, showProgress bool, excludeList []string) int64 {
+func getFolderSize(folderPath string, excludeList []string) int64 {
 	totalSize := int64(0)
 	fileCount := 0
 
@@ -129,7 +131,7 @@ func getSizesOfSubfolders(parentFolder string, showProgress bool, excludeList []
 
 		if entry.IsDir() {
 			fullPath := filepath.Join(parentFolder, entry.Name())
-			subfolderSizes[entry.Name()] = getFolderSize(fullPath, showProgress, excludeList)
+			subfolderSizes[entry.Name()] = getFolderSize(fullPath, excludeList)
 		} else {
 			info, err := entry.Info()
 			if err != nil {
@@ -273,6 +275,15 @@ func main() {
 			// Clear screen unless disabled
 			if !noClear {
 				fmt.Print("\033[H\033[2J") // Clear screen
+				var command *exec.Cmd
+				if runtime.GOOS == "windows" {
+					command = exec.Command("cls")
+				} else {
+					command = exec.Command("clear")
+				}
+				command.Stdout = os.Stdout
+				command.Stderr = os.Stderr
+				command.Run()
 			}
 
 			// Validate path

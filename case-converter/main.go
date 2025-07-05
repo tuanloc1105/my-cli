@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"unicode"
 
@@ -227,7 +229,16 @@ Examples:
   case-converter "hello world" --format snake`,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Clear screen
-			fmt.Print("\033[H\033[2J")
+			fmt.Print("\033[H\033[2J") // Clear screen
+			var command *exec.Cmd
+			if runtime.GOOS == "windows" {
+				command = exec.Command("cls")
+			} else {
+				command = exec.Command("clear")
+			}
+			command.Stdout = os.Stdout
+			command.Stderr = os.Stderr
+			command.Run()
 
 			var inputText string
 			if file != "" {
