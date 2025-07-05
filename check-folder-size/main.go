@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,48 +8,28 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
-// ANSI color codes
-const (
-	colorReset  = "\033[0m"
-	colorGreen  = "\033[42m\033[1;30m"
-	colorYellow = "\033[43m\033[1;30m"
-	colorRed    = "\033[41m\033[1;30m"
-)
-
-type folderItem struct {
-	name string
-	size int64
+type SizeInfo struct {
+	Name string
+	Size int64
 }
 
-type sizeInfo struct {
-	value float64
-	unit  string
-	color string
+type FormatResult struct {
+	Size  float64
+	Unit  string
+	Color int
 }
 
 func getTerminalWidth() int {
-	// Try to get terminal width, fallback to 80
-	if width := getTerminalSize(); width > 0 {
-		return width
-	}
+	// Simple fallback to 80 columns
 	return 80
 }
 
-func getTerminalSize() int {
-	// This is a simplified version - in a real implementation you'd use a library like "golang.org/x/term"
-	// For now, we'll return a default value
-	return 80
-}
-
-func clearLine() {
-	width := getTerminalWidth()
-	fmt.Printf("\r%s\r", strings.Repeat(" ", width))
-}
-
-func color(msg string, colorCode string) string {
-	return fmt.Sprintf("%s %s %s", colorCode, msg, colorReset)
+func color(msg string, bg int) string {
+	return fmt.Sprintf("\033[%dm\033[1;30m %s \033[0m", bg, msg)
 }
 
 func shouldExclude(name string, excludeList []string) bool {
@@ -59,7 +38,7 @@ func shouldExclude(name string, excludeList []string) bool {
 	}
 
 	for _, excludeItem := range excludeList {
-		if strings.TrimSpace(excludeItem) == name {
+		if name == strings.TrimSpace(excludeItem) {
 			return true
 		}
 	}
@@ -67,8 +46,8 @@ func shouldExclude(name string, excludeList []string) bool {
 }
 
 func getFolderSize(folderPath string, showProgress bool, excludeList []string) int64 {
-	var totalSize int64
-	var fileCount int
+	totalSize := int64(0)
+	fileCount := 0
 
 	err := filepath.WalkDir(folderPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -80,19 +59,21 @@ func getFolderSize(folderPath string, showProgress bool, excludeList []string) i
 			return nil
 		}
 
-		// Get relative path from root
+		// Get relative path from the root
 		relPath, err := filepath.Rel(folderPath, path)
 		if err != nil {
 			return nil
 		}
 
-		// Check if this item should be excluded
+		// Check if this path should be excluded
 		parts := strings.Split(relPath, string(os.PathSeparator))
-		if len(parts) > 0 && shouldExclude(parts[0], excludeList) {
-			if d.IsDir() {
-				return filepath.SkipDir
+		for _, part := range parts {
+			if shouldExclude(part, excludeList) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			return nil
 		}
 
 		if !d.IsDir() {
@@ -108,7 +89,7 @@ func getFolderSize(folderPath string, showProgress bool, excludeList []string) i
 	})
 
 	if err != nil {
-		return 0
+		// Ignore errors, just return what we have
 	}
 
 	return totalSize
@@ -132,28 +113,29 @@ func getSizesOfSubfolders(parentFolder string, showProgress bool, excludeList []
 		}
 
 		if showProgress {
+			// Create progress message
 			progressMsg := fmt.Sprintf("Processing %d/%d: %s", i+1, totalItems, entry.Name())
 			terminalWidth := getTerminalWidth()
 
-			// Truncate if too long
+			// Truncate if too long, then pad
 			if len(progressMsg) > terminalWidth-1 {
 				progressMsg = progressMsg[:terminalWidth-4] + "..."
 			}
 
-			// Pad to terminal width
+			// Pad to terminal width and clear any remnants
 			paddedMsg := fmt.Sprintf("%-*s", terminalWidth-1, progressMsg)
 			fmt.Printf("\r%s", paddedMsg)
 		}
 
-		entryPath := filepath.Join(parentFolder, entry.Name())
-
 		if entry.IsDir() {
-			subfolderSizes[entry.Name()] = getFolderSize(entryPath, showProgress, excludeList)
+			fullPath := filepath.Join(parentFolder, entry.Name())
+			subfolderSizes[entry.Name()] = getFolderSize(fullPath, showProgress, excludeList)
 		} else {
 			info, err := entry.Info()
-			if err == nil {
-				subfolderSizes[entry.Name()] = info.Size()
+			if err != nil {
+				continue
 			}
+			subfolderSizes[entry.Name()] = info.Size()
 		}
 	}
 
@@ -164,9 +146,9 @@ func getSizesOfSubfolders(parentFolder string, showProgress bool, excludeList []
 	return subfolderSizes
 }
 
-func formatSize(size int64) sizeInfo {
+func formatSize(size int64) FormatResult {
 	if size == 0 {
-		return sizeInfo{0, "bytes", colorGreen}
+		return FormatResult{0, "bytes", 42}
 	}
 
 	units := []string{"bytes", "KB", "MB", "GB", "TB"}
@@ -179,16 +161,16 @@ func formatSize(size int64) sizeInfo {
 	}
 
 	// Color based on size: green for small, yellow for medium, red for large
-	var colorCode string
+	var msgColor int
 	if unitIndex <= 1 { // bytes, KB
-		colorCode = colorGreen
+		msgColor = 42 // green
 	} else if unitIndex <= 2 { // MB
-		colorCode = colorYellow
+		msgColor = 43 // yellow
 	} else { // GB, TB
-		colorCode = colorRed
+		msgColor = 41 // red
 	}
 
-	return sizeInfo{sizeFloat, units[unitIndex], colorCode}
+	return FormatResult{sizeFloat, units[unitIndex], msgColor}
 }
 
 func printResults(subfolderSizes map[string]int64, parentFolder, sortBy string, reverse bool) {
@@ -198,9 +180,9 @@ func printResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 	}
 
 	// Convert map to slice for sorting
-	var items []folderItem
+	var items []SizeInfo
 	for name, size := range subfolderSizes {
-		items = append(items, folderItem{name, size})
+		items = append(items, SizeInfo{name, size})
 	}
 
 	// Sort results
@@ -208,33 +190,32 @@ func printResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 	case "size":
 		sort.Slice(items, func(i, j int) bool {
 			if reverse {
-				return items[i].size > items[j].size
+				return items[i].Size > items[j].Size
 			}
-			return items[i].size < items[j].size
+			return items[i].Size < items[j].Size
 		})
 	case "name":
 		sort.Slice(items, func(i, j int) bool {
 			if reverse {
-				return strings.ToLower(items[i].name) > strings.ToLower(items[j].name)
+				return strings.ToLower(items[i].Name) > strings.ToLower(items[j].Name)
 			}
-			return strings.ToLower(items[i].name) < strings.ToLower(items[j].name)
+			return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
 		})
 	}
 
 	// Calculate total size
 	var totalSize int64
 	for _, item := range items {
-		totalSize += item.size
+		totalSize += item.Size
 	}
-
 	totalFormatted := formatSize(totalSize)
 
 	// Print header
-	fmt.Println(strings.Repeat("=", 80))
+	fmt.Printf("\n%s\n", strings.Repeat("=", 80))
 	fmt.Printf("📁 Parent Folder: %s\n", parentFolder)
-	fmt.Printf("📊 Total Size: %.2f %s\n", totalFormatted.value, color(totalFormatted.unit, totalFormatted.color))
+	fmt.Printf("📊 Total Size: %.2f %s\n", totalFormatted.Size, color(totalFormatted.Unit, totalFormatted.Color))
 	fmt.Printf("📈 Items Found: %d\n", len(subfolderSizes))
-	fmt.Println(strings.Repeat("=", 80))
+	fmt.Printf("%s\n", strings.Repeat("=", 80))
 
 	// Print table header
 	fmt.Printf("%-15s %-10s %-50s\n", "Size", "Unit", "Name")
@@ -242,12 +223,12 @@ func printResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 
 	// Print items
 	for _, item := range items {
-		sizeInfo := formatSize(item.size)
-		sizeStr := fmt.Sprintf("%.2f", sizeInfo.value)
-		unitStr := color(sizeInfo.unit, sizeInfo.color)
+		formatted := formatSize(item.Size)
+		sizeStr := fmt.Sprintf("%.2f", formatted.Size)
+		unitStr := color(formatted.Unit, formatted.Color)
 
 		// Truncate long names
-		displayName := item.name
+		displayName := item.Name
 		if len(displayName) > 50 {
 			displayName = displayName[:47] + "..."
 		}
@@ -260,61 +241,84 @@ func printResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 
 func main() {
 	var (
-		path        = flag.String("path", ".", "Path to analyze (default: current directory)")
-		sortBy      = flag.String("sort", "size", "Sort by size or name")
-		asc         = flag.Bool("asc", false, "Sort in ascending order")
-		progress    = flag.Bool("progress", false, "Show progress during calculation")
-		noClear     = flag.Bool("no-clear", false, "Don't clear screen before output")
-		excludeDirs = flag.String("exclude-dirs", "", "Comma-separated list of folders/files to exclude (e.g., node_modules,.git,target)")
+		sortBy      string
+		asc         bool
+		progress    bool
+		noClear     bool
+		excludeDirs string
 	)
-	flag.Parse()
 
-	// Parse exclude list
-	var excludeList []string
-	if *excludeDirs != "" {
-		for _, item := range strings.Split(*excludeDirs, ",") {
-			if trimmed := strings.TrimSpace(item); trimmed != "" {
-				excludeList = append(excludeList, trimmed)
+	rootCmd := &cobra.Command{
+		Use:   "check-folder-size [path]",
+		Short: "Calculate folder sizes with improved features",
+		Long:  `A tool to analyze folder sizes with progress tracking, exclusion lists, and colored output.`,
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			// Parse exclude list
+			var excludeList []string
+			if excludeDirs != "" {
+				excludeList = strings.Split(excludeDirs, ",")
+				// Trim whitespace from each item
+				for i, item := range excludeList {
+					excludeList[i] = strings.TrimSpace(item)
+				}
 			}
-		}
+
+			// Determine path to analyze
+			path := "."
+			if len(args) > 0 {
+				path = args[0]
+			}
+
+			// Clear screen unless disabled
+			if !noClear {
+				fmt.Print("\033[H\033[2J") // Clear screen
+			}
+
+			// Validate path
+			parentFolder, err := filepath.Abs(path)
+			if err != nil {
+				fmt.Printf("❌ Error: Invalid path '%s': %v\n", path, err)
+				os.Exit(1)
+			}
+
+			if _, err := os.Stat(parentFolder); os.IsNotExist(err) {
+				fmt.Printf("❌ Error: Path '%s' does not exist!\n", parentFolder)
+				os.Exit(1)
+			}
+
+			fmt.Printf("🔍 Analyzing: %s\n", parentFolder)
+			if len(excludeList) > 0 {
+				fmt.Printf("🚫 Excluding: %s\n", strings.Join(excludeList, ", "))
+			}
+			if progress {
+				fmt.Println("⏳ Calculating sizes (this may take a while for large directories)...")
+			}
+
+			startTime := time.Now()
+
+			// Get folder sizes
+			subfolderSizes := getSizesOfSubfolders(parentFolder, progress, excludeList)
+
+			endTime := time.Now()
+
+			if progress {
+				fmt.Printf("\n✅ Analysis completed in %.2f seconds\n", endTime.Sub(startTime).Seconds())
+			}
+
+			// Print results
+			printResults(subfolderSizes, parentFolder, sortBy, !asc)
+		},
 	}
 
-	// Clear screen unless disabled
-	if !*noClear {
-		fmt.Print("\033[H\033[2J") // Clear screen
-	}
+	rootCmd.Flags().StringVarP(&sortBy, "sort", "s", "size", "Sort by size or name")
+	rootCmd.Flags().BoolVarP(&asc, "asc", "a", false, "Sort in ascending order")
+	rootCmd.Flags().BoolVarP(&progress, "progress", "p", false, "Show progress during calculation")
+	rootCmd.Flags().BoolVarP(&noClear, "no-clear", "n", false, "Don't clear screen before output")
+	rootCmd.Flags().StringVarP(&excludeDirs, "exclude-dirs", "e", "", "Comma-separated list of folders/files to exclude (e.g., node_modules,.git,target)")
 
-	// Validate path
-	parentFolder, err := filepath.Abs(*path)
-	if err != nil {
-		fmt.Printf("❌ Error: Invalid path '%s': %v\n", *path, err)
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Printf("❌ Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	if _, err := os.Stat(parentFolder); os.IsNotExist(err) {
-		fmt.Printf("❌ Error: Path '%s' does not exist!\n", parentFolder)
-		os.Exit(1)
-	}
-
-	fmt.Printf("🔍 Analyzing: %s\n", parentFolder)
-	if len(excludeList) > 0 {
-		fmt.Printf("🚫 Excluding: %s\n", strings.Join(excludeList, ", "))
-	}
-	if *progress {
-		fmt.Println("⏳ Calculating sizes (this may take a while for large directories)...")
-	}
-
-	startTime := time.Now()
-
-	// Get folder sizes
-	subfolderSizes := getSizesOfSubfolders(parentFolder, *progress, excludeList)
-
-	endTime := time.Now()
-
-	if *progress {
-		fmt.Printf("\n✅ Analysis completed in %.2f seconds\n", endTime.Sub(startTime).Seconds())
-	}
-
-	// Print results
-	printResults(subfolderSizes, parentFolder, *sortBy, !*asc)
 }
