@@ -234,9 +234,11 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 
 	ff.progressTracker.SetTotalDirs(totalDirs)
 
+	fmt.Println("Max workers: ", ff.maxWorkers)
+
 	// Create worker pool
 	semaphore := make(chan struct{}, ff.maxWorkers)
-	var wg sync.WaitGroup
+	var wg sync.WaitGroup = sync.WaitGroup{}
 
 	filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
