@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"common-module/utils"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,52 +35,61 @@ const (
 
 // ProgressTracker tracks search progress
 type ProgressTracker struct {
-	mu            sync.Mutex
-	totalDirs     int
-	processedDirs int
-	foundFiles    int
-	foundDirs     int
-	startTime     time.Time
+	mu             sync.Mutex
+	totalDirs      int64
+	processedDirs  int64
+	foundFiles     int64
+	foundDirs      int64
+	startTime      time.Time
+	lastUpdate     time.Time
+	updateInterval time.Duration
 }
 
 func NewProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
-		startTime: time.Now(),
+		startTime:      time.Now(),
+		lastUpdate:     time.Now(),
+		updateInterval: 100 * time.Millisecond, // Update progress every 100ms
 	}
 }
 
 func (pt *ProgressTracker) Update(filesCount, dirsCount int) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-	pt.foundFiles += filesCount
-	pt.foundDirs += dirsCount
+	atomic.AddInt64(&pt.foundFiles, int64(filesCount))
+	atomic.AddInt64(&pt.foundDirs, int64(dirsCount))
 }
 
 func (pt *ProgressTracker) UpdateProcessedDirs(count int) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-	pt.processedDirs += count
+	atomic.AddInt64(&pt.processedDirs, int64(count))
 }
 
 func (pt *ProgressTracker) SetTotalDirs(total int) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-	pt.totalDirs = total
+	atomic.StoreInt64(&pt.totalDirs, int64(total))
 }
 
 func (pt *ProgressTracker) PrintProgress() {
+	now := time.Now()
+	if now.Sub(pt.lastUpdate) < pt.updateInterval {
+		return // Skip update if not enough time has passed
+	}
+
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
-	elapsed := time.Since(pt.startTime).Seconds()
 
-	if pt.totalDirs > 0 {
-		progress := float64(pt.processedDirs) / float64(pt.totalDirs) * 100
+	pt.lastUpdate = now
+	elapsed := time.Since(pt.startTime).Seconds()
+	totalDirs := atomic.LoadInt64(&pt.totalDirs)
+	processedDirs := atomic.LoadInt64(&pt.processedDirs)
+	foundFiles := atomic.LoadInt64(&pt.foundFiles)
+	foundDirs := atomic.LoadInt64(&pt.foundDirs)
+
+	if totalDirs > 0 {
+		progress := float64(processedDirs) / float64(totalDirs) * 100
 		fmt.Printf("\r%sProgress: %.1f%% | Processed: %d/%d | Found: %d files, %d dirs | Time: %.1fs%s",
-			ColorOKCyan, progress, pt.processedDirs, pt.totalDirs, pt.foundFiles, pt.foundDirs, elapsed, ColorEndC)
-	} else {
+			ColorOKCyan, progress, processedDirs, totalDirs, foundFiles, foundDirs, elapsed, ColorEndC)
+	} /* else {
 		fmt.Printf("\r%sProcessed: %d | Found: %d files, %d dirs | Time: %.1fs%s",
-			ColorOKCyan, pt.processedDirs, pt.foundFiles, pt.foundDirs, elapsed, ColorEndC)
-	}
+			ColorOKCyan, processedDirs, foundFiles, foundDirs, elapsed, ColorEndC)
+	} */
 }
 
 // FileFinder handles file and directory searching
@@ -96,6 +107,20 @@ type FileFinder struct {
 	maxResults      int
 	progressTracker *ProgressTracker
 	patternRegex    *regexp.Regexp
+	ctx             context.Context
+	cancel          context.CancelFunc
+	resultsChan     chan SearchResult
+	workerPool      chan struct{}
+	mu              sync.RWMutex
+	fileCache       map[string]int64 // Cache file sizes to avoid repeated stat calls
+}
+
+// SearchResult represents a single search result
+type SearchResult struct {
+	Path     string
+	IsDir    bool
+	Size     int64
+	FullPath string
 }
 
 func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*FileFinder, error) {
@@ -129,11 +154,14 @@ func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*F
 		fileTypes[strings.ToLower(ext)] = true
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	maxWorkers := options["maxWorkers"].(int)
+
 	return &FileFinder{
 		basePath:        basePath,
 		pattern:         pattern,
 		caseSensitive:   options["caseSensitive"].(bool),
-		maxWorkers:      options["maxWorkers"].(int),
+		maxWorkers:      maxWorkers,
 		excludeDirs:     excludeDirs,
 		excludePatterns: excludePatterns,
 		fileTypes:       fileTypes,
@@ -143,6 +171,11 @@ func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*F
 		maxResults:      options["maxResults"].(int),
 		progressTracker: NewProgressTracker(),
 		patternRegex:    patternRegex,
+		ctx:             ctx,
+		cancel:          cancel,
+		resultsChan:     make(chan SearchResult, maxWorkers*10), // Buffer for results
+		workerPool:      make(chan struct{}, maxWorkers),
+		fileCache:       make(map[string]int64),
 	}, nil
 }
 
@@ -169,12 +202,37 @@ func (ff *FileFinder) matchesPattern(name string) bool {
 	return ff.patternRegex.MatchString(name)
 }
 
-func (ff *FileFinder) checkFileSize(filePath string) bool {
+func (ff *FileFinder) getFileSize(filePath string) (int64, bool) {
+	// Check cache first
+	ff.mu.RLock()
+	if size, exists := ff.fileCache[filePath]; exists {
+		ff.mu.RUnlock()
+		return size, true
+	}
+	ff.mu.RUnlock()
+
+	// Get file info
 	info, err := os.Stat(filePath)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	size := info.Size()
+
+	// Cache the result with size limit to prevent memory explosion
+	ff.mu.Lock()
+	if len(ff.fileCache) < 10000 { // Limit cache size
+		ff.fileCache[filePath] = size
+	}
+	ff.mu.Unlock()
+
+	return size, true
+}
+
+func (ff *FileFinder) checkFileSize(filePath string) bool {
+	size, ok := ff.getFileSize(filePath)
+	if !ok {
+		return false
+	}
 	return size >= ff.minSize && size <= ff.maxSize
 }
 
@@ -186,29 +244,74 @@ func (ff *FileFinder) checkFileType(filePath string) bool {
 	return ff.fileTypes[ext]
 }
 
-func (ff *FileFinder) processDirectory(root string, entries []fs.DirEntry) ([]string, []string) {
-	matchedFiles := []string{}
-	matchedDirs := []string{}
+func (ff *FileFinder) processDirectory(root string, entries []fs.DirEntry) {
+	// Pre-allocate slices with estimated capacity
+	estimatedCapacity := len(entries) / 4 // Assume 25% match rate
+	if estimatedCapacity < 10 {
+		estimatedCapacity = 10
+	}
+
+	// Use a buffer to batch results and reduce channel operations
+	var results []SearchResult
+	results = make([]SearchResult, 0, estimatedCapacity)
 
 	for _, entry := range entries {
-		if ff.shouldExclude(filepath.Join(root, entry.Name())) {
+		// Check for cancellation
+		select {
+		case <-ff.ctx.Done():
+			return
+		default:
+		}
+
+		entryName := entry.Name()
+		fullPath := filepath.Join(root, entryName)
+
+		if ff.shouldExclude(fullPath) {
 			continue
 		}
 
-		if ff.matchesPattern(entry.Name()) {
-			fullPath := filepath.Join(root, entry.Name())
-
+		if ff.matchesPattern(entryName) {
 			if entry.IsDir() {
-				matchedDirs = append(matchedDirs, fullPath)
+				results = append(results, SearchResult{Path: entryName, IsDir: true, FullPath: fullPath})
 			} else {
+				// Check file type first (cheaper than size check)
 				if ff.checkFileType(fullPath) && ff.checkFileSize(fullPath) {
-					matchedFiles = append(matchedFiles, fullPath)
+					size, _ := ff.getFileSize(fullPath)
+					results = append(results, SearchResult{Path: entryName, IsDir: false, Size: size, FullPath: fullPath})
 				}
 			}
 		}
 	}
 
-	return matchedFiles, matchedDirs
+	// Send all results at once to reduce channel overhead
+	if len(results) > 0 {
+		for _, result := range results {
+			select {
+			case ff.resultsChan <- result:
+			case <-ff.ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (ff *FileFinder) worker() {
+	for {
+		select {
+		case <-ff.ctx.Done():
+			return
+		default:
+		}
+
+		// Get work from the queue
+		select {
+		case <-ff.workerPool:
+			// This is a signal to process a directory
+			// The actual directory processing is done in the main loop
+		case <-ff.ctx.Done():
+			return
+		}
+	}
 }
 
 func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
@@ -216,30 +319,143 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 		fmt.Printf("%sStarting search...%s\n", ColorOKBlue, ColorEndC)
 	}
 
-	var matchedFiles []string
-	var matchedDirs []string
-	var mu sync.Mutex
+	// Start progress updater goroutine
+	var progressTicker *time.Ticker
+	if ff.showProgress {
+		progressTicker = time.NewTicker(100 * time.Millisecond)
+		defer progressTicker.Stop()
+		go func() {
+			for {
+				select {
+				case <-progressTicker.C:
+					ff.progressTracker.PrintProgress()
+				case <-ff.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
-	// Count total directories for progress tracking
-	totalDirs := 0
-	// filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
-	// 	if err != nil {
-	// 		return nil
-	// 	}
-	// 	if d.IsDir() && !ff.shouldExclude(path) {
-	// 		totalDirs++
-	// 	}
-	// 	return nil
-	// })
+	// Add memory usage monitoring for large searches
+	if ff.showProgress {
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					var m runtime.MemStats
+					runtime.ReadMemStats(&m)
+					if m.Alloc > 100*1024*1024 { // 100MB threshold
+						fmt.Printf("\n%sMemory usage: %.1f MB%s\n", ColorWarning, float64(m.Alloc)/1024/1024, ColorEndC)
+					}
+				case <-ff.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
-	ff.progressTracker.SetTotalDirs(totalDirs)
+	// Count total directories for progress tracking (using the commented code logic)
+	totalDirs := int64(0)
+	filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && !ff.shouldExclude(path) {
+			totalDirs++
+		}
+		return nil
+	})
+
+	ff.progressTracker.SetTotalDirs(int(totalDirs))
 
 	fmt.Println("Max workers: ", ff.maxWorkers)
 
-	// Create worker pool
-	semaphore := make(chan struct{}, ff.maxWorkers)
-	var wg sync.WaitGroup = sync.WaitGroup{}
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < ff.maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ff.worker()
+		}()
+	}
 
+	// Collect results with proper synchronization
+	var matchedFiles []string
+	var matchedDirs []string
+	var resultCount int32
+	var resultsMu sync.Mutex
+	var resultsWg sync.WaitGroup
+
+	// Start result collector goroutine
+	resultsWg.Add(1)
+	go func() {
+		defer resultsWg.Done()
+		for {
+			select {
+			case result, ok := <-ff.resultsChan:
+				if !ok {
+					return // Channel closed
+				}
+
+				resultsMu.Lock()
+				if result.IsDir {
+					matchedDirs = append(matchedDirs, result.FullPath)
+				} else {
+					matchedFiles = append(matchedFiles, result.FullPath)
+				}
+				resultsMu.Unlock()
+
+				newCount := atomic.AddInt32(&resultCount, 1)
+				ff.progressTracker.Update(0, 1) // Update progress
+
+				// Check if we've reached max results
+				if int(newCount) >= ff.maxResults {
+					ff.cancel() // Signal all goroutines to stop
+					return
+				}
+			case <-ff.ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Process directories with improved concurrency
+	processedDirs := int64(0)
+	dirQueue := make(chan string, ff.maxWorkers*2)
+
+	// Start directory processors
+	var dirWg sync.WaitGroup
+	for i := 0; i < ff.maxWorkers; i++ {
+		dirWg.Add(1)
+		go func() {
+			defer dirWg.Done()
+			for {
+				select {
+				case dirPath, ok := <-dirQueue:
+					if !ok {
+						return // Channel closed
+					}
+
+					entries, err := os.ReadDir(dirPath)
+					if err != nil {
+						continue
+					}
+
+					ff.processDirectory(dirPath, entries)
+					atomic.AddInt64(&processedDirs, 1)
+					ff.progressTracker.UpdateProcessedDirs(1)
+
+				case <-ff.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// Walk directories and queue them for processing
 	filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -249,43 +465,30 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 			return nil
 		}
 
-		// Process directory in goroutine
-		wg.Add(1)
-		semaphore <- struct{}{} // Acquire semaphore
+		// Check for cancellation
+		select {
+		case <-ff.ctx.Done():
+			return filepath.SkipAll
+		default:
+		}
 
-		go func(dirPath string) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // Release semaphore
-
-			entries, err := os.ReadDir(dirPath)
-			if err != nil {
-				return
-			}
-
-			files, dirs := ff.processDirectory(dirPath, entries)
-
-			mu.Lock()
-			matchedFiles = append(matchedFiles, files...)
-			matchedDirs = append(matchedDirs, dirs...)
-			mu.Unlock()
-
-			ff.progressTracker.Update(len(files), len(dirs))
-			ff.progressTracker.UpdateProcessedDirs(1)
-
-			if ff.showProgress {
-				ff.progressTracker.PrintProgress()
-			}
-
-			// Early exit if max results reached
-			if len(matchedFiles)+len(matchedDirs) >= ff.maxResults {
-				return
-			}
-		}(path)
+		// Queue directory for processing
+		select {
+		case dirQueue <- path:
+		case <-ff.ctx.Done():
+			return filepath.SkipAll
+		}
 
 		return nil
 	})
 
-	wg.Wait()
+	// Close channels and wait for completion
+	close(dirQueue)
+	dirWg.Wait()
+
+	// Cancel context and wait for result collector
+	ff.cancel()
+	resultsWg.Wait()
 
 	if ff.showProgress {
 		fmt.Println() // New line after progress
