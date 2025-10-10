@@ -6,11 +6,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 type SizeInfo struct {
@@ -25,7 +29,11 @@ type FormatResult struct {
 }
 
 func getTerminalWidth() int {
-	// Simple fallback to 80 columns
+	// Try to get actual terminal width
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+		return width
+	}
+	// Fallback to 80 columns if unable to detect
 	return 80
 }
 
@@ -96,6 +104,17 @@ func getFolderSize(folderPath string, excludeList []string) int64 {
 	return totalSize
 }
 
+type workItem struct {
+	name  string
+	path  string
+	isDir bool
+}
+
+type workResult struct {
+	name string
+	size int64
+}
+
 func getSizesOfSubfolders(parentFolder string, showProgress bool, excludeList []string) map[string]int64 {
 	subfolderSizes := make(map[string]int64)
 
@@ -105,39 +124,86 @@ func getSizesOfSubfolders(parentFolder string, showProgress bool, excludeList []
 		return subfolderSizes
 	}
 
-	totalItems := len(entries)
-
-	for i, entry := range entries {
-		// Skip if this item should be excluded
+	// Filter out excluded items
+	var workItems []workItem
+	for _, entry := range entries {
 		if shouldExclude(entry.Name(), excludeList) {
 			continue
 		}
+		workItems = append(workItems, workItem{
+			name:  entry.Name(),
+			path:  filepath.Join(parentFolder, entry.Name()),
+			isDir: entry.IsDir(),
+		})
+	}
 
-		if showProgress {
-			// Create progress message
-			progressMsg := fmt.Sprintf("Processing %d/%d: %s", i+1, totalItems, entry.Name())
-			terminalWidth := getTerminalWidth()
+	totalItems := len(workItems)
+	if totalItems == 0 {
+		return subfolderSizes
+	}
 
-			// Truncate if too long, then pad
-			if len(progressMsg) > terminalWidth-1 {
-				progressMsg = progressMsg[:terminalWidth-4] + "..."
+	// Use worker pool for parallel processing
+	numWorkers := runtime.NumCPU()
+	if numWorkers > totalItems {
+		numWorkers = totalItems
+	}
+
+	jobs := make(chan workItem, totalItems)
+	results := make(chan workResult, totalItems)
+	var wg sync.WaitGroup
+	var processedCount int64
+
+	// Start worker goroutines
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range jobs {
+				var size int64
+				if item.isDir {
+					size = getFolderSize(item.path, excludeList)
+				} else {
+					if info, err := os.Stat(item.path); err == nil {
+						size = info.Size()
+					}
+				}
+
+				results <- workResult{name: item.name, size: size}
+
+				// Update progress
+				if showProgress {
+					count := atomic.AddInt64(&processedCount, 1)
+					progressMsg := fmt.Sprintf("Processing %d/%d: %s", count, totalItems, item.name)
+					terminalWidth := getTerminalWidth()
+
+					if len(progressMsg) > terminalWidth-1 {
+						progressMsg = progressMsg[:terminalWidth-4] + "..."
+					}
+
+					paddedMsg := fmt.Sprintf("%-*s", terminalWidth-1, progressMsg)
+					fmt.Printf("\r%s", paddedMsg)
+				}
 			}
+		}()
+	}
 
-			// Pad to terminal width and clear any remnants
-			paddedMsg := fmt.Sprintf("%-*s", terminalWidth-1, progressMsg)
-			fmt.Printf("\r%s", paddedMsg)
+	// Send jobs to workers
+	go func() {
+		for _, item := range workItems {
+			jobs <- item
 		}
+		close(jobs)
+	}()
 
-		if entry.IsDir() {
-			fullPath := filepath.Join(parentFolder, entry.Name())
-			subfolderSizes[entry.Name()] = getFolderSize(fullPath, excludeList)
-		} else {
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			subfolderSizes[entry.Name()] = info.Size()
-		}
+	// Collect results in a separate goroutine
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Gather results
+	for result := range results {
+		subfolderSizes[result.name] = result.size
 	}
 
 	if showProgress {
