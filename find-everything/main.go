@@ -109,8 +109,6 @@ type FileFinder struct {
 	patternRegex    *regexp.Regexp
 	ctx             context.Context
 	cancel          context.CancelFunc
-	resultsChan     chan SearchResult
-	workerPool      chan struct{}
 	mu              sync.RWMutex
 	fileCache       map[string]int64 // Cache file sizes to avoid repeated stat calls
 }
@@ -173,8 +171,6 @@ func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*F
 		patternRegex:    patternRegex,
 		ctx:             ctx,
 		cancel:          cancel,
-		resultsChan:     make(chan SearchResult, maxWorkers*10), // Buffer for results
-		workerPool:      make(chan struct{}, maxWorkers),
 		fileCache:       make(map[string]int64),
 	}, nil
 }
@@ -244,25 +240,16 @@ func (ff *FileFinder) checkFileType(filePath string) bool {
 	return ff.fileTypes[ext]
 }
 
-func (ff *FileFinder) processDirectory(root string, entries []fs.DirEntry) {
+func (ff *FileFinder) processDirectory(root string, entries []fs.DirEntry) []SearchResult {
 	// Pre-allocate slices with estimated capacity
 	estimatedCapacity := len(entries) / 4 // Assume 25% match rate
 	if estimatedCapacity < 10 {
 		estimatedCapacity = 10
 	}
 
-	// Use a buffer to batch results and reduce channel operations
-	var results []SearchResult
-	results = make([]SearchResult, 0, estimatedCapacity)
+	results := make([]SearchResult, 0, estimatedCapacity)
 
 	for _, entry := range entries {
-		// Check for cancellation
-		select {
-		case <-ff.ctx.Done():
-			return
-		default:
-		}
-
 		entryName := entry.Name()
 		fullPath := filepath.Join(root, entryName)
 
@@ -283,35 +270,12 @@ func (ff *FileFinder) processDirectory(root string, entries []fs.DirEntry) {
 		}
 	}
 
-	// Send all results at once to reduce channel overhead
-	if len(results) > 0 {
-		for _, result := range results {
-			select {
-			case ff.resultsChan <- result:
-			case <-ff.ctx.Done():
-				return
-			}
-		}
-	}
+	return results
 }
 
-func (ff *FileFinder) worker() {
-	for {
-		select {
-		case <-ff.ctx.Done():
-			return
-		default:
-		}
-
-		// Get work from the queue
-		select {
-		case <-ff.workerPool:
-			// This is a signal to process a directory
-			// The actual directory processing is done in the main loop
-		case <-ff.ctx.Done():
-			return
-		}
-	}
+type dirJob struct {
+	path    string
+	entries []fs.DirEntry
 }
 
 func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
@@ -336,116 +300,70 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 		}()
 	}
 
-	// Add memory usage monitoring for large searches
-	if ff.showProgress {
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					var m runtime.MemStats
-					runtime.ReadMemStats(&m)
-					if m.Alloc > 100*1024*1024 { // 100MB threshold
-						fmt.Printf("\n%sMemory usage: %.1f MB%s\n", ColorWarning, float64(m.Alloc)/1024/1024, ColorEndC)
-					}
-				case <-ff.ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	// Count total directories for progress tracking (using the commented code logic)
-	totalDirs := int64(0)
-	filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() && !ff.shouldExclude(path) {
-			totalDirs++
-		}
-		return nil
-	})
-
-	ff.progressTracker.SetTotalDirs(int(totalDirs))
-
 	fmt.Println("Max workers: ", ff.maxWorkers)
-
-	// Start worker goroutines
-	var wg sync.WaitGroup
-	for i := 0; i < ff.maxWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ff.worker()
-		}()
-	}
 
 	// Collect results with proper synchronization
 	var matchedFiles []string
 	var matchedDirs []string
-	var resultCount int32
 	var resultsMu sync.Mutex
-	var resultsWg sync.WaitGroup
 
-	// Start result collector goroutine
-	resultsWg.Add(1)
-	go func() {
-		defer resultsWg.Done()
-		for {
-			select {
-			case result, ok := <-ff.resultsChan:
-				if !ok {
-					return // Channel closed
-				}
-
-				resultsMu.Lock()
-				if result.IsDir {
-					matchedDirs = append(matchedDirs, result.FullPath)
-				} else {
-					matchedFiles = append(matchedFiles, result.FullPath)
-				}
-				resultsMu.Unlock()
-
-				newCount := atomic.AddInt32(&resultCount, 1)
-				ff.progressTracker.Update(0, 1) // Update progress
-
-				// Check if we've reached max results
-				if int(newCount) >= ff.maxResults {
-					ff.cancel() // Signal all goroutines to stop
-					return
-				}
-			case <-ff.ctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Process directories with improved concurrency
-	processedDirs := int64(0)
-	dirQueue := make(chan string, ff.maxWorkers*2)
+	// Process directories with improved concurrency - single pass
+	dirQueue := make(chan dirJob, ff.maxWorkers*4)
+	var dirWg sync.WaitGroup
+	totalDirs := int64(0)
 
 	// Start directory processors
-	var dirWg sync.WaitGroup
 	for i := 0; i < ff.maxWorkers; i++ {
 		dirWg.Add(1)
 		go func() {
 			defer dirWg.Done()
+			localFiles := make([]string, 0, 100)
+			localDirs := make([]string, 0, 100)
+
 			for {
 				select {
-				case dirPath, ok := <-dirQueue:
+				case job, ok := <-dirQueue:
 					if !ok {
-						return // Channel closed
+						// Flush local results
+						if len(localFiles) > 0 || len(localDirs) > 0 {
+							resultsMu.Lock()
+							matchedFiles = append(matchedFiles, localFiles...)
+							matchedDirs = append(matchedDirs, localDirs...)
+							resultsMu.Unlock()
+						}
+						return
 					}
 
-					entries, err := os.ReadDir(dirPath)
-					if err != nil {
-						continue
+					results := ff.processDirectory(job.path, job.entries)
+
+					// Batch results locally to reduce lock contention
+					for _, result := range results {
+						if result.IsDir {
+							localDirs = append(localDirs, result.FullPath)
+						} else {
+							localFiles = append(localFiles, result.FullPath)
+						}
 					}
 
-					ff.processDirectory(dirPath, entries)
-					atomic.AddInt64(&processedDirs, 1)
+					// Flush when batch gets large
+					if len(localFiles)+len(localDirs) > 100 {
+						resultsMu.Lock()
+						matchedFiles = append(matchedFiles, localFiles...)
+						matchedDirs = append(matchedDirs, localDirs...)
+						newCount := int32(len(matchedFiles) + len(matchedDirs))
+						resultsMu.Unlock()
+
+						localFiles = localFiles[:0]
+						localDirs = localDirs[:0]
+
+						// Check if we've reached max results
+						if newCount >= int32(ff.maxResults) {
+							ff.cancel()
+							return
+						}
+					}
+
+					ff.progressTracker.Update(len(results), 0)
 					ff.progressTracker.UpdateProcessedDirs(1)
 
 				case <-ff.ctx.Done():
@@ -455,14 +373,18 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 		}()
 	}
 
-	// Walk directories and queue them for processing
+	// Walk directories and queue them for processing - single pass
 	filepath.WalkDir(ff.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 
-		if !d.IsDir() || ff.shouldExclude(path) {
+		if !d.IsDir() {
 			return nil
+		}
+
+		if ff.shouldExclude(path) {
+			return filepath.SkipDir
 		}
 
 		// Check for cancellation
@@ -472,9 +394,19 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 		default:
 		}
 
+		// Count and process in one pass
+		atomic.AddInt64(&totalDirs, 1)
+		ff.progressTracker.SetTotalDirs(int(atomic.LoadInt64(&totalDirs)))
+
+		// Read directory entries
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return nil
+		}
+
 		// Queue directory for processing
 		select {
-		case dirQueue <- path:
+		case dirQueue <- dirJob{path: path, entries: entries}:
 		case <-ff.ctx.Done():
 			return filepath.SkipAll
 		}
@@ -485,10 +417,6 @@ func (ff *FileFinder) findFilesAndDirs() ([]string, []string) {
 	// Close channels and wait for completion
 	close(dirQueue)
 	dirWg.Wait()
-
-	// Cancel context and wait for result collector
-	ff.cancel()
-	resultsWg.Wait()
 
 	if ff.showProgress {
 		fmt.Println() // New line after progress
