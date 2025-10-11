@@ -77,16 +77,18 @@ func (pt *ProgressTracker) PrintProgress() {
 
 	pt.lastUpdate = now
 	elapsed := time.Since(pt.startTime).Seconds()
-	totalDirs := atomic.LoadInt64(&pt.totalDirs)
+	// totalDirs := atomic.LoadInt64(&pt.totalDirs)
 	processedDirs := atomic.LoadInt64(&pt.processedDirs)
 	foundFiles := atomic.LoadInt64(&pt.foundFiles)
 	foundDirs := atomic.LoadInt64(&pt.foundDirs)
+	fmt.Printf("\r%sProcessed: %d | Found: %d files, %d dirs | Time: %.1fs%s",
+		ColorOKCyan, processedDirs, foundFiles, foundDirs, elapsed, ColorEndC)
 
-	if totalDirs > 0 {
+	/* if totalDirs > 0 {
 		progress := float64(processedDirs) / float64(totalDirs) * 100
 		fmt.Printf("\r%sProgress: %.1f%% | Processed: %d/%d | Found: %d files, %d dirs | Time: %.1fs%s",
 			ColorOKCyan, progress, processedDirs, totalDirs, foundFiles, foundDirs, elapsed, ColorEndC)
-	} /* else {
+	} */ /* else {
 		fmt.Printf("\r%sProcessed: %d | Found: %d files, %d dirs | Time: %.1fs%s",
 			ColorOKCyan, processedDirs, foundFiles, foundDirs, elapsed, ColorEndC)
 	} */
