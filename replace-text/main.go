@@ -11,21 +11,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// isTextFile checks if a file is likely a text file by trying to read it with UTF-8 encoding
-func isTextFile(filepath string) bool {
-	data, err := os.ReadFile(filepath)
-	if err != nil {
-		return false
-	}
-	return utf8.Valid(data)
-}
-
-// replaceInFile performs the find-and-replace operation on a single file, supporting multi-line replacements
-func replaceInFile(filename, oldText, newText string, createBackup bool) error {
-	// Read the entire file content to handle multi-line strings
+// processFile checks if a file is text and performs the replacement if it is.
+// It reads the file only once for efficiency.
+func processFile(filename, oldText, newText string, createBackup bool) error {
+	// Read the entire file content
 	content, err := os.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Check if it's a valid UTF-8 text file
+	if !utf8.Valid(content) {
+		// Silently skip binary files (or log verbose if we had a verbose flag)
+		return nil
 	}
 
 	contentStr := string(content)
@@ -47,9 +45,6 @@ func replaceInFile(filename, oldText, newText string, createBackup bool) error {
 		if err := os.Rename(filename, backupFilename); err != nil {
 			return fmt.Errorf("failed to create backup: %w", err)
 		}
-	} else {
-		// If not creating backup, read original content for potential rollback
-		// (we'll just overwrite directly)
 	}
 
 	// Perform the replacement
@@ -81,15 +76,32 @@ func findAndReplace(path, oldText, newText string, createBackup bool) error {
 
 	if info.IsDir() {
 		fmt.Printf("Processing directory: %s\n", path)
-		err := filepath.WalkDir(path, func(filepath string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(path, func(walkPath string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
-			}
-			if !d.IsDir() && isTextFile(filepath) {
-				if replaceErr := replaceInFile(filepath, oldText, newText, createBackup); replaceErr != nil {
-					fmt.Fprintf(os.Stderr, "Error processing '%s': %v\n", filepath, replaceErr)
+				// Log error but continue walking (unless it's the root path which is critical,
+				// but usually WalkDir sends err for children)
+				// If we can't access a directory, we should skip it.
+				if d.IsDir() {
+					fmt.Fprintf(os.Stderr, "Warning: Skipping directory '%s' due to error: %v\n", walkPath, err)
+					return filepath.SkipDir
 				}
+				fmt.Fprintf(os.Stderr, "Warning: Skipping file '%s' due to error: %v\n", walkPath, err)
+				return nil
 			}
+
+			if d.IsDir() {
+				// Skip .git directories
+				if d.Name() == ".git" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// It's a file
+			if err := processFile(walkPath, oldText, newText, createBackup); err != nil {
+				fmt.Fprintf(os.Stderr, "Error processing '%s': %v\n", walkPath, err)
+			}
+
 			return nil
 		})
 		if err != nil {
@@ -101,16 +113,13 @@ func findAndReplace(path, oldText, newText string, createBackup bool) error {
 			fmt.Println("You can delete them if they are not needed.")
 		}
 	} else {
-		if isTextFile(path) {
-			if err := replaceInFile(path, oldText, newText, createBackup); err != nil {
-				return err
-			}
-			if createBackup {
-				fmt.Printf("Backup file created at '%s.bak'.\n", path)
-				fmt.Println("You can delete the backup file if it's not needed.")
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "Skipping binary file: %s\n", path)
+		// Single file processing
+		if err := processFile(path, oldText, newText, createBackup); err != nil {
+			return err
+		}
+		if createBackup {
+			fmt.Printf("Backup file created at '%s.bak'.\n", path)
+			fmt.Println("You can delete the backup file if it's not needed.")
 		}
 	}
 
