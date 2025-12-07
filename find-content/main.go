@@ -164,19 +164,26 @@ func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex bool, sh
 
 	totalMatches := 0
 
-	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
+		// Handle permission errors or other errors during walk
 		if err != nil {
-			return err
+			if os.IsPermission(err) {
+				fmt.Fprintf(os.Stderr, "Warning: Permission denied: %s\n", path)
+				return nil // Skip this file/directory and continue
+			}
+			// For other errors, print warning and continue
+			fmt.Fprintf(os.Stderr, "Warning: Error accessing %s: %v\n", path, err)
+			return nil
 		}
 
-		if info.IsDir() {
-			if fs.shouldSkipDirectory(info.Name()) {
+		if d.IsDir() {
+			if fs.shouldSkipDirectory(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		if fs.shouldSkipFile(info.Name()) {
+		if fs.shouldSkipFile(d.Name()) {
 			return nil
 		}
 
