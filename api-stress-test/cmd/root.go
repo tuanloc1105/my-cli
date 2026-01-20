@@ -1,3 +1,5 @@
+// Package cmd provides the command-line interface and test execution logic
+// for the API stress test tool.
 package cmd
 
 import (
@@ -171,7 +173,7 @@ func RunStressTest(
 
 	for _, status := range statusKeys {
 		count := stat.StatusCount[status]
-		label := "ERROR/NO STATUS"
+		label := "ERROR/NO STATUS" // Status code 0 indicates request errors
 		if status != 0 {
 			label = fmt.Sprintf("%d", status)
 		}
@@ -183,9 +185,9 @@ func RunStressTest(
 	fmt.Printf("  Min                 : %.4f\n", stat.MinLatency)
 	fmt.Printf("  Max                 : %.4f\n", stat.MaxLatency)
 	fmt.Printf("  Average             : %.4f\n", stat.AvgLatency)
-	fmt.Printf("  p50                 : %.4f\n", stat.P50Latency)
-	fmt.Printf("  p90                 : %.4f\n", stat.P90Latency)
-	fmt.Printf("  p99                 : %.4f\n", stat.P99Latency)
+	fmt.Printf("  p50                 : %.4f\n", stat.P50Latency) // Median
+	fmt.Printf("  p90                 : %.4f\n", stat.P90Latency) // 90th percentile
+	fmt.Printf("  p99                 : %.4f\n", stat.P99Latency) // 99th percentile
 }
 
 func max(a, b int) int {

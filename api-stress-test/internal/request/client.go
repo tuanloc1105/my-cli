@@ -1,3 +1,5 @@
+// Package request provides HTTP request execution and body preparation
+// functionality for the API stress test tool.
 package request
 
 import (
@@ -103,12 +105,12 @@ func PrepareBody(
 	contentTypeFlag string,
 ) ([]byte, string, error) {
 	// Priority 1: JSON body (highest priority, includes validation)
+	// JSON from file takes precedence over JSON string
 	if jsonFile != "" {
 		data, err := os.ReadFile(jsonFile)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to read JSON file: %w", err)
 		}
-		// Validate JSON
 		if !json.Valid(data) {
 			return nil, "", fmt.Errorf("invalid JSON in file")
 		}
@@ -117,7 +119,6 @@ func PrepareBody(
 
 	if jsonBody != "" {
 		data := []byte(strings.TrimSpace(jsonBody))
-		// Validate JSON
 		if !json.Valid(data) {
 			return nil, "", fmt.Errorf("invalid JSON string")
 		}
@@ -134,6 +135,7 @@ func PrepareBody(
 	}
 
 	// Priority 3: Raw body content (file or string)
+	// Raw file takes precedence over raw string
 	if rawFile != "" {
 		data, err := os.ReadFile(rawFile)
 		if err != nil {
@@ -141,7 +143,7 @@ func PrepareBody(
 		}
 		ct := contentTypeFlag
 		if ct == "" {
-			ct = "text/plain" // default for raw file
+			ct = "text/plain"
 		}
 		return data, ct, nil
 	}
@@ -149,7 +151,7 @@ func PrepareBody(
 	if rawBody != "" {
 		ct := contentTypeFlag
 		if ct == "" {
-			ct = "text/plain" // default for raw string
+			ct = "text/plain"
 		}
 		return []byte(rawBody), ct, nil
 	}

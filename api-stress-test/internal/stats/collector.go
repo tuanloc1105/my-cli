@@ -1,3 +1,5 @@
+// Package stats provides thread-safe statistics collection and calculation
+// for HTTP stress test results, including latency percentiles.
 package stats
 
 import (
@@ -38,13 +40,14 @@ func (c *Collector) Record(statusCode int, elapsed float64, ok bool) {
 	defer c.mu.Unlock()
 
 	c.latencies = append(c.latencies, elapsed)
+	// Track HTTP status code distribution (status code 0 indicates request errors)
 	if statusCode != 0 {
 		c.statusCount[statusCode]++
 	} else {
 		c.statusCount[0]++
 	}
 
-	// Track min/max latency
+	// Track min/max latency in real-time
 	if c.firstLatency {
 		c.minLatency = elapsed
 		c.maxLatency = elapsed
@@ -94,7 +97,7 @@ func (c *Collector) GetStatistics() Statistics {
 		}
 	}
 
-	// Sort latencies for percentile calculation
+	// Sort latencies for percentile calculation (create copy to avoid modifying original)
 	latencies := make([]float64, len(c.latencies))
 	copy(latencies, c.latencies)
 	sort.Float64s(latencies)
@@ -106,10 +109,10 @@ func (c *Collector) GetStatistics() Statistics {
 	}
 	avgLatency /= float64(len(latencies))
 
-	// Calculate percentiles with interpolation
-	p50 := percentile(latencies, 0.50)
-	p90 := percentile(latencies, 0.90)
-	p99 := percentile(latencies, 0.99)
+	// Calculate percentiles using linear interpolation for accuracy
+	p50 := percentile(latencies, 0.50) // Median
+	p90 := percentile(latencies, 0.90) // 90th percentile
+	p99 := percentile(latencies, 0.99) // 99th percentile
 
 	// Create a copy of statusCount for thread safety
 	statusCountCopy := make(map[int]int)
