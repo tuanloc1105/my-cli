@@ -12,6 +12,7 @@ func main() {
 	var (
 		useRegex         bool
 		caseSensitive    bool
+		multiline        bool
 		extensions       string
 		excludeDirs      string
 		excludeFiles     string
@@ -33,7 +34,8 @@ Examples:
   find-content /path/to/search "pattern" --regex
   find-content /path/to/search "text" --extensions py,js,txt
   find-content /path/to/search "version" --case-sensitive
-  find-content /path/to/search "error" --exclude-dirs node_modules,.git`,
+  find-content /path/to/search "error" --exclude-dirs node_modules,.git
+  find-content /path/to/search "line1\nline2\nline3" --multiline`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			directory := args[0]
@@ -67,6 +69,7 @@ Examples:
 					directory,
 					keyword,
 					useRegex,
+					multiline,
 					!noLineNumbers,
 					!noFilePath,
 					maxResultsPtr,
@@ -84,6 +87,7 @@ Examples:
 	// Add flags
 	rootCmd.Flags().BoolVarP(&useRegex, "regex", "r", false, "Treat keyword as regex pattern")
 	rootCmd.Flags().BoolVarP(&caseSensitive, "case-sensitive", "c", false, "Case sensitive search")
+	rootCmd.Flags().BoolVarP(&multiline, "multiline", "M", false, "Enable multiline search with \\n in keyword")
 	rootCmd.Flags().StringVarP(&extensions, "extensions", "e", "", "Comma-separated list of file extensions to search")
 	rootCmd.Flags().StringVar(&excludeDirs, "exclude-dirs", "", "Comma-separated list of directories to exclude")
 	rootCmd.Flags().StringVar(&excludeFiles, "exclude-files", "", "Comma-separated list of files to exclude")

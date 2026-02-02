@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -89,12 +90,14 @@ func (fs *FileSearcher) shouldSkipFile(fileName string) bool {
 }
 
 // searchInFile searches for keyword in a single file
-func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex bool) []struct {
+func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex, multiline bool) []struct {
 	lineNum int
+	endLine int
 	content string
 } {
 	var matches []struct {
 		lineNum int
+		endLine int
 		content string
 	}
 
@@ -106,6 +109,10 @@ func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex bool) []
 		return matches
 	}
 	defer file.Close()
+
+	if multiline {
+		return fs.searchInFileMultiline(filePath, file, keyword, useRegex)
+	}
 
 	scanner := bufio.NewScanner(file)
 	lineNum := 1
@@ -140,8 +147,9 @@ func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex bool) []
 		if matched {
 			matches = append(matches, struct {
 				lineNum int
+				endLine int
 				content string
-			}{lineNum, line})
+			}{lineNum, lineNum, line})
 		}
 		lineNum++
 	}
@@ -155,8 +163,107 @@ func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex bool) []
 	return matches
 }
 
+// searchInFileMultiline searches for multiline keyword in a single file
+func (fs *FileSearcher) searchInFileMultiline(filePath string, file *os.File, keyword string, useRegex bool) []struct {
+	lineNum int
+	endLine int
+	content string
+} {
+	var matches []struct {
+		lineNum int
+		endLine int
+		content string
+	}
+
+	// Convert escaped newlines to actual newlines
+	searchPattern := strings.ReplaceAll(keyword, "\\n", "\n")
+
+	// Read file content and normalize line endings (Windows \r\n -> Unix \n)
+	contentBytes, err := io.ReadAll(file)
+	if err != nil {
+		if !fs.suppressWarnings {
+			fmt.Fprintf(os.Stderr, "Warning: Could not read %s: %v\n", filePath, err)
+		}
+		return matches
+	}
+
+	// Normalize Windows line endings to Unix line endings for consistent searching
+	content := strings.ReplaceAll(string(contentBytes), "\r\n", "\n")
+
+	var searchContent string
+	var searchPatternLower string
+
+	if !fs.caseSensitive {
+		searchContent = strings.ToLower(content)
+		searchPatternLower = strings.ToLower(searchPattern)
+	} else {
+		searchContent = content
+		searchPatternLower = searchPattern
+	}
+
+	var foundPositions []struct {
+		start int
+		end   int
+	}
+
+	if useRegex {
+		flags := ""
+		if !fs.caseSensitive {
+			flags = "(?i)"
+		}
+		re, err := regexp.Compile(flags + searchPattern)
+		if err != nil {
+			if !fs.suppressWarnings {
+				fmt.Fprintf(os.Stderr, "Warning: Invalid regex pattern: %v\n", err)
+			}
+			return matches
+		}
+		matchesRegex := re.FindAllStringIndex(content, -1)
+		for _, match := range matchesRegex {
+			foundPositions = append(foundPositions, struct {
+				start int
+				end   int
+			}{match[0], match[1]})
+		}
+	} else {
+		idx := strings.Index(searchContent, searchPatternLower)
+		patternLen := len(searchPatternLower)
+		for idx != -1 {
+			foundPositions = append(foundPositions, struct {
+				start int
+				end   int
+			}{idx, idx + patternLen})
+			if idx+patternLen >= len(searchContent) {
+				break
+			}
+			nextIdx := strings.Index(searchContent[idx+patternLen:], searchPatternLower)
+			if nextIdx == -1 {
+				break
+			}
+			idx = idx + patternLen + nextIdx
+		}
+	}
+
+	// Convert character positions to line numbers and build output
+	for _, pos := range foundPositions {
+		startLineNum := strings.Count(content[:pos.start], "\n") + 1
+		endLineNum := strings.Count(content[:pos.end], "\n") + 1
+
+		// Get the matched content and convert newlines to \n for display
+		matchedContent := strings.ReplaceAll(content[pos.start:pos.end], "\n", "\\n")
+
+		matches = append(matches, struct {
+			lineNum int
+			endLine int
+			content string
+		}{startLineNum, endLineNum, matchedContent})
+	}
+
+	return matches
+}
+
 // grepRecursive recursively searches for keyword in files
-func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex bool, showLineNumbers, showFilePath bool, maxResults *int) int {
+func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex, multiline bool, showLineNumbers, showFilePath bool, maxResults *int) int {
 	info, err := os.Stat(rootDir)
 	if err != nil {
 		if !fs.suppressWarnings {
@@ -205,7 +312,7 @@ func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex bool, sh
 			return nil
 		}
 
-		matches := fs.searchInFile(path, keyword, useRegex)
+		matches := fs.searchInFile(path, keyword, useRegex, multiline)
 
 		for _, match := range matches {
 			var outputParts []string
@@ -215,7 +322,11 @@ func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex bool, sh
 			}
 
 			if showLineNumbers {
-				outputParts = append(outputParts, fmt.Sprintf("%d", match.lineNum))
+				if multiline && match.lineNum != match.endLine {
+					outputParts = append(outputParts, fmt.Sprintf("%d..%d", match.lineNum, match.endLine))
+				} else {
+					outputParts = append(outputParts, fmt.Sprintf("%d", match.lineNum))
+				}
 			}
 
 			outputParts = append(outputParts, match.content)
