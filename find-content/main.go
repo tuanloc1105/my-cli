@@ -22,6 +22,7 @@ func main() {
 		listMode         bool
 		showHidden       bool
 		suppressWarnings bool
+		searchAll        bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -53,7 +54,7 @@ Examples:
 				excludeFilesList = strings.Split(excludeFiles, ",")
 			}
 
-			searcher := NewFileSearcher(caseSensitive, suppressWarnings, fileExtensions, excludeDirsList, excludeFilesList)
+			searcher := NewFileSearcher(caseSensitive, suppressWarnings, searchAll, fileExtensions, excludeDirsList, excludeFilesList)
 
 			if listMode {
 				if err := searcher.listDirectoryContents(directory, showHidden); err != nil {
@@ -97,6 +98,7 @@ Examples:
 	rootCmd.Flags().BoolVarP(&listMode, "list", "l", false, "List directory contents instead of searching")
 	rootCmd.Flags().BoolVar(&showHidden, "show-hidden", false, "Show hidden files when listing")
 	rootCmd.Flags().BoolVar(&suppressWarnings, "suppress-warnings", false, "Suppress warning messages")
+	rootCmd.Flags().BoolVar(&searchAll, "all", false, "Search in all files (not limited by extension)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -18,13 +18,15 @@ type FileSearcher struct {
 	excludeFiles     map[string]bool
 	textExtensions   map[string]bool
 	suppressWarnings bool
+	searchAll        bool
 }
 
 // NewFileSearcher creates a new FileSearcher instance
-func NewFileSearcher(caseSensitive, suppressWarnings bool, fileExtensions, excludeDirs, excludeFiles []string) *FileSearcher {
+func NewFileSearcher(caseSensitive, suppressWarnings, searchAll bool, fileExtensions, excludeDirs, excludeFiles []string) *FileSearcher {
 	fs := &FileSearcher{
 		caseSensitive:    caseSensitive,
 		suppressWarnings: suppressWarnings,
+		searchAll:        searchAll,
 		fileExtensions:   make(map[string]bool),
 		excludeDirs:      make(map[string]bool),
 		excludeFiles:     make(map[string]bool),
@@ -68,6 +70,11 @@ func NewFileSearcher(caseSensitive, suppressWarnings bool, fileExtensions, exclu
 
 // isTextFile checks if a file is likely a text file
 func (fs *FileSearcher) isTextFile(filePath string) bool {
+	// If searchAll is enabled, attempt to read any file as text
+	if fs.searchAll {
+		return true
+	}
+
 	ext := strings.ToLower(filepath.Ext(filePath))
 
 	// Check explicit extensions first
