@@ -11,12 +11,17 @@ import (
 	"sync"
 )
 
-// SearchResult represents a single search result
-type SearchResult struct {
-	Path     string
-	IsDir    bool
-	Size     int64
-	FullPath string
+// FinderOptions holds all configuration for FileFinder
+type FinderOptions struct {
+	CaseSensitive   bool
+	MaxWorkers      int
+	ExcludeDirs     []string
+	ExcludePatterns []string
+	FileTypes       []string
+	MinSize         int64
+	MaxSize         int64
+	ShowProgress    bool
+	MaxResults      int
 }
 
 // FileFinder handles file and directory searching
@@ -40,10 +45,10 @@ type FileFinder struct {
 	fileCache       map[string]int64 // Cache file sizes to avoid repeated stat calls
 }
 
-func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*FileFinder, error) {
+func NewFileFinder(basePath, pattern string, opts FinderOptions) (*FileFinder, error) {
 	// Compile pattern regex
 	regexPattern := GlobToRegex(pattern)
-	if !options["caseSensitive"].(bool) {
+	if !opts.CaseSensitive {
 		regexPattern = "(?i)" + regexPattern
 	}
 	patternRegex, err := regexp.Compile(regexPattern)
@@ -53,32 +58,28 @@ func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*F
 
 	// Compile exclude patterns
 	var excludePatterns []*regexp.Regexp
-	if patterns, ok := options["excludePatterns"].([]string); ok {
-		for _, pattern := range patterns {
-			if re, err := regexp.Compile(pattern); err == nil {
-				excludePatterns = append(excludePatterns, re)
-			}
+	for _, p := range opts.ExcludePatterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid exclude pattern %q: %v", p, err)
 		}
+		excludePatterns = append(excludePatterns, re)
 	}
 
 	// Build exclude dirs set
 	excludeDirs := make(map[string]bool)
-	if dirs, ok := options["excludeDirs"].([]string); ok {
-		for _, dir := range dirs {
-			excludeDirs[strings.ToLower(dir)] = true
-		}
+	for _, dir := range opts.ExcludeDirs {
+		excludeDirs[strings.ToLower(dir)] = true
 	}
 
 	// Build file types set
 	fileTypes := make(map[string]bool)
-	if exts, ok := options["fileTypes"].([]string); ok {
-		for _, ext := range exts {
-			fileTypes[strings.ToLower(ext)] = true
-		}
+	for _, ext := range opts.FileTypes {
+		fileTypes[strings.ToLower(ext)] = true
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	maxWorkers := options["maxWorkers"].(int)
+	maxWorkers := opts.MaxWorkers
 	if maxWorkers <= 0 {
 		maxWorkers = 1
 	}
@@ -86,15 +87,15 @@ func NewFileFinder(basePath, pattern string, options map[string]interface{}) (*F
 	return &FileFinder{
 		basePath:        basePath,
 		pattern:         pattern,
-		caseSensitive:   options["caseSensitive"].(bool),
+		caseSensitive:   opts.CaseSensitive,
 		maxWorkers:      maxWorkers,
 		excludeDirs:     excludeDirs,
 		excludePatterns: excludePatterns,
 		fileTypes:       fileTypes,
-		minSize:         options["minSize"].(int64),
-		maxSize:         options["maxSize"].(int64),
-		showProgress:    options["showProgress"].(bool),
-		maxResults:      options["maxResults"].(int),
+		minSize:         opts.MinSize,
+		maxSize:         opts.MaxSize,
+		showProgress:    opts.ShowProgress,
+		maxResults:      opts.MaxResults,
 		progressTracker: ui.NewProgressTracker(),
 		patternRegex:    patternRegex,
 		ctx:             ctx,

@@ -33,8 +33,6 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 		}()
 	}
 
-	fmt.Println("Max workers: ", ff.maxWorkers)
-
 	var matchedFiles []string
 	var matchedDirs []string
 	var resultsMu sync.Mutex
@@ -47,7 +45,8 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 	var workerWg sync.WaitGroup
 
 	// Atomic counters
-	totalDirs := int64(0)
+	var totalDirs int64
+	var skippedDirs int64
 
 	// Start workers
 	for i := 0; i < ff.maxWorkers; i++ {
@@ -81,8 +80,7 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 			defer flush()
 
 			for path := range dirQueue {
-				// We act on 'path', which implies it was counted in processingWg
-				processDir(ff, path, &dirQueue, &processingWg, &localFiles, &localDirs, &totalDirs)
+				processDir(ff, path, dirQueue, &processingWg, &localFiles, &localDirs, &totalDirs, &skippedDirs)
 
 				// Flush periodically
 				if len(localFiles)+len(localDirs) > 100 {
@@ -114,12 +112,18 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 		fmt.Println() // New line after progress
 	}
 
+	if skipped := atomic.LoadInt64(&skippedDirs); skipped > 0 {
+		fmt.Printf("%sWarning: %d directories could not be read (permission denied or other errors)%s\n",
+			ui.ColorWarning, skipped, ui.ColorEndC)
+	}
+
 	return matchedFiles, matchedDirs
 }
 
-func processDir(ff *FileFinder, path string, dirQueue *chan string, wg *sync.WaitGroup, localFiles *[]string, localDirs *[]string, totalDirs *int64) {
+func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.WaitGroup, localFiles *[]string, localDirs *[]string, totalDirs *int64, skippedDirs *int64) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
+		atomic.AddInt64(skippedDirs, 1)
 		return
 	}
 
@@ -159,9 +163,6 @@ func processDir(ff *FileFinder, path string, dirQueue *chan string, wg *sync.Wai
 
 		// If directory, queue for traversal
 		if isDir {
-			// Double check exclusion (redundant with ShouldExclude above but safe)
-			// Actually we already checked ShouldExclude at the top of loop.
-
 			select {
 			case <-ff.ctx.Done():
 				return
@@ -171,18 +172,15 @@ func processDir(ff *FileFinder, path string, dirQueue *chan string, wg *sync.Wai
 
 				wg.Add(1)
 
-				// Non-blocking send or spin?
-				// If channel is full, we must not block the worker if all workers are blocked.
-				// But we have large buffer 10000.
-				// Ideally we should use a goroutine if channel is full, OR rely on large buffer.
-				// To be safe against deadlocks:
+				// Non-blocking send to prevent deadlock: all workers are both
+				// producers and consumers of dirQueue. If channel is full and
+				// all workers block on send, nobody consumes → deadlock.
+				// Fallback goroutine keeps the worker free to continue consuming.
 				select {
-				case *dirQueue <- fullPath:
+				case dirQueue <- fullPath:
 				default:
-					// Channel full. Launch a goroutine to wait.
-					// This prevents this worker from blocking, consuming the queue.
 					go func(p string) {
-						*dirQueue <- p
+						dirQueue <- p
 					}(fullPath)
 				}
 			}

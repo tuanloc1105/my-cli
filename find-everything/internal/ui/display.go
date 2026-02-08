@@ -6,7 +6,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -26,21 +25,16 @@ const (
 
 // ProgressTracker tracks search progress
 type ProgressTracker struct {
-	mu             sync.Mutex
-	totalDirs      int64
-	processedDirs  int64
-	foundFiles     int64
-	foundDirs      int64
-	startTime      time.Time
-	lastUpdate     time.Time
-	updateInterval time.Duration
+	totalDirs     int64
+	processedDirs int64
+	foundFiles    int64
+	foundDirs     int64
+	startTime     time.Time
 }
 
 func NewProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
-		startTime:      time.Now(),
-		lastUpdate:     time.Now(),
-		updateInterval: 100 * time.Millisecond, // Update progress every 100ms
+		startTime: time.Now(),
 	}
 }
 
@@ -58,17 +52,7 @@ func (pt *ProgressTracker) SetTotalDirs(total int) {
 }
 
 func (pt *ProgressTracker) PrintProgress() {
-	now := time.Now()
-	pt.mu.Lock()
-	if now.Sub(pt.lastUpdate) < pt.updateInterval {
-		pt.mu.Unlock()
-		return // Skip update if not enough time has passed
-	}
-	defer pt.mu.Unlock()
-
-	pt.lastUpdate = now
 	elapsed := time.Since(pt.startTime).Seconds()
-	// totalDirs := atomic.LoadInt64(&pt.totalDirs)
 	processedDirs := atomic.LoadInt64(&pt.processedDirs)
 	foundFiles := atomic.LoadInt64(&pt.foundFiles)
 	foundDirs := atomic.LoadInt64(&pt.foundDirs)

@@ -73,16 +73,16 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 			fmt.Printf("%sSearching in: %s%s\n", ui.ColorOKBlue, basePath, ui.ColorEndC)
 			fmt.Printf("%sPattern: %s%s\n", ui.ColorOKBlue, pattern, ui.ColorEndC)
 
-			options := map[string]interface{}{
-				"caseSensitive":   caseSensitive,
-				"maxWorkers":      maxWorkers,
-				"excludeDirs":     processedExcludeDirs,
-				"excludePatterns": excludePatterns,
-				"fileTypes":       fileTypes,
-				"minSize":         minSizeBytes,
-				"maxSize":         maxSizeBytes,
-				"maxResults":      maxResults,
-				"showProgress":    !noProgress,
+			options := finder.FinderOptions{
+				CaseSensitive:   caseSensitive,
+				MaxWorkers:      maxWorkers,
+				ExcludeDirs:     processedExcludeDirs,
+				ExcludePatterns: excludePatterns,
+				FileTypes:       fileTypes,
+				MinSize:         minSizeBytes,
+				MaxSize:         maxSizeBytes,
+				MaxResults:      maxResults,
+				ShowProgress:    !noProgress,
 			}
 
 			f, err := finder.NewFileFinder(basePath, pattern, options)
@@ -121,22 +121,28 @@ func parseSize(sizeStr string) (int64, error) {
 	}
 
 	sizeStr = strings.ToUpper(sizeStr)
-	multipliers := map[string]int64{
-		"B":  1,
-		"KB": 1024,
-		"MB": 1024 * 1024,
-		"GB": 1024 * 1024 * 1024,
-		"TB": 1024 * 1024 * 1024 * 1024,
+
+	// Ordered from longest suffix to shortest to avoid ambiguous matching
+	// (e.g., "1KB" matching "B" before "KB")
+	units := []struct {
+		suffix     string
+		multiplier int64
+	}{
+		{"TB", 1024 * 1024 * 1024 * 1024},
+		{"GB", 1024 * 1024 * 1024},
+		{"MB", 1024 * 1024},
+		{"KB", 1024},
+		{"B", 1},
 	}
 
-	for unit, multiplier := range multipliers {
-		if strings.HasSuffix(sizeStr, unit) {
-			numStr := strings.TrimSuffix(sizeStr, unit)
+	for _, u := range units {
+		if strings.HasSuffix(sizeStr, u.suffix) {
+			numStr := strings.TrimSuffix(sizeStr, u.suffix)
 			num, err := strconv.ParseFloat(numStr, 64)
 			if err != nil {
 				return 0, err
 			}
-			return int64(num * float64(multiplier)), nil
+			return int64(num * float64(u.multiplier)), nil
 		}
 	}
 
