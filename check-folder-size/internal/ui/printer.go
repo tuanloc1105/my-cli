@@ -110,10 +110,11 @@ func PrintResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 		sizeStr := fmt.Sprintf("%.2f", formatted.Size)
 		unitStr := color(formatted.Unit, formatted.Color)
 
-		// Truncate long names
+		// Truncate long names (rune-safe for UTF-8)
 		displayName := item.Name
-		if len(displayName) > 50 {
-			displayName = displayName[:47] + "..."
+		runes := []rune(displayName)
+		if len(runes) > 50 {
+			displayName = string(runes[:47]) + "..."
 		}
 
 		fmt.Fprintf(w, "%s\t%s\t%s\n", sizeStr, unitStr, displayName)
