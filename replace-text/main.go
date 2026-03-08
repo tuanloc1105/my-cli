@@ -1,143 +1,264 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 )
 
-// processFile checks if a file is text and performs the replacement if it is.
-// It reads the file only once for efficiency.
-func processFile(filename, oldText, newText string, createBackup bool) error {
+const (
+	// Only check the first 8KB to determine if a file is binary.
+	binaryCheckSize = 8192
+	// Default max file size: 512MB. Files larger than this are skipped.
+	defaultMaxFileSize int64 = 512 * 1024 * 1024
+)
+
+// processFile checks if a file is text and performs the replacement.
+func processFile(filename string, oldText, newText []byte, createBackup bool, maxFileSize int64) error {
+	// Stat to get permission and size
+	info, err := os.Stat(filename)
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	if info.Size() > maxFileSize {
+		return errNoChange
+	}
+
 	// Read the entire file content
 	content, err := os.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Check if it's a valid UTF-8 text file
-	if !utf8.Valid(content) {
-		// Silently skip binary files (or log verbose if we had a verbose flag)
-		return nil
+	// Check if it's a valid UTF-8 text file (only check first N bytes).
+	// Trim back to the last valid rune boundary to avoid cutting multi-byte characters.
+	checkLen := len(content)
+	if checkLen > binaryCheckSize {
+		checkLen = binaryCheckSize
+		for checkLen > 0 && !utf8.RuneStart(content[checkLen-1]) {
+			checkLen--
+		}
+		if checkLen > 0 {
+			checkLen-- // drop the potentially incomplete leading byte
+		}
 	}
-
-	contentStr := string(content)
+	if checkLen == 0 || !utf8.Valid(content[:checkLen]) {
+		return errNoChange
+	}
 
 	// If oldText is not in the file, there is nothing to do
-	if !strings.Contains(contentStr, oldText) {
-		return nil
+	if !bytes.Contains(content, oldText) {
+		return errNoChange
 	}
+
+	perm := info.Mode().Perm()
 
 	var backupFilename string
 	if createBackup {
-		// Create a backup file by renaming the original
 		backupFilename = filename + ".bak"
-
-		// Remove existing backup if it exists
 		os.Remove(backupFilename)
-
-		// Rename original to backup
 		if err := os.Rename(filename, backupFilename); err != nil {
 			return fmt.Errorf("failed to create backup: %w", err)
 		}
 	}
 
-	// Perform the replacement
-	newContent := strings.ReplaceAll(contentStr, oldText, newText)
+	newContent := bytes.ReplaceAll(content, oldText, newText)
 
-	// Write the new content to the original filename
-	if err := os.WriteFile(filename, []byte(newContent), 0644); err != nil {
+	// Atomic write: write to temp file then rename
+	dir := filepath.Dir(filename)
+	tmp, err := os.CreateTemp(dir, ".replace-text-*.tmp")
+	if err != nil {
 		if createBackup {
-			// Attempt to restore from backup on error
-			if backupErr := os.Rename(backupFilename, filename); backupErr != nil {
-				return fmt.Errorf("failed to write file and restore backup: %w (backup error: %v)", err, backupErr)
-			}
+			os.Rename(backupFilename, filename)
 		}
-		return fmt.Errorf("failed to write file: %w", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(newContent); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		if createBackup {
+			os.Rename(backupFilename, filename)
+		}
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		if createBackup {
+			os.Rename(backupFilename, filename)
+		}
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Preserve original file permissions
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		if createBackup {
+			os.Rename(backupFilename, filename)
+		}
+		return fmt.Errorf("failed to set file permissions: %w", err)
+	}
+
+	// Atomically replace the original file
+	if err := os.Rename(tmpName, filename); err != nil {
+		os.Remove(tmpName)
+		if createBackup {
+			os.Rename(backupFilename, filename)
+		}
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	fmt.Printf("Successfully replaced text in '%s'.\n", filename)
 	return nil
 }
 
-// findAndReplace finds and replaces all occurrences of oldText with newText
-// If 'path' is a file, it modifies that file.
-// If 'path' is a directory, it recursively modifies all text files within it.
-func findAndReplace(path, oldText, newText string, createBackup bool) error {
+// errNoChange is a sentinel error indicating the file was not modified.
+var errNoChange = fmt.Errorf("no change")
+
+// findAndReplace finds and replaces all occurrences of oldText with newText.
+func findAndReplace(path string, oldText, newText []byte, createBackup bool, maxFileSize int64) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("path '%s' not found or is not a valid file/directory: %w", path, err)
 	}
 
-	if info.IsDir() {
-		fmt.Printf("Processing directory: %s\n", path)
-		err := filepath.WalkDir(path, func(walkPath string, d fs.DirEntry, err error) error {
-			if err != nil {
-				// Log error but continue walking (unless it's the root path which is critical,
-				// but usually WalkDir sends err for children)
-				// If we can't access a directory, we should skip it.
-				if d.IsDir() {
-					fmt.Fprintf(os.Stderr, "Warning: Skipping directory '%s' due to error: %v\n", walkPath, err)
-					return filepath.SkipDir
-				}
-				fmt.Fprintf(os.Stderr, "Warning: Skipping file '%s' due to error: %v\n", walkPath, err)
-				return nil
-			}
-
-			if d.IsDir() {
-				// Skip .git directories
-				if d.Name() == ".git" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			// It's a file
-			if err := processFile(walkPath, oldText, newText, createBackup); err != nil {
-				fmt.Fprintf(os.Stderr, "Error processing '%s': %v\n", walkPath, err)
-			}
-
+	if !info.IsDir() {
+		err := processFile(path, oldText, newText, createBackup, maxFileSize)
+		if err == errNoChange {
 			return nil
-		})
+		}
 		if err != nil {
-			return fmt.Errorf("error walking directory: %w", err)
-		}
-		fmt.Printf("\nFinished processing directory '%s'.\n", path)
-		if createBackup {
-			fmt.Println("Backup files (.bak) were created for all modified files.")
-			fmt.Println("You can delete them if they are not needed.")
-		}
-	} else {
-		// Single file processing
-		if err := processFile(path, oldText, newText, createBackup); err != nil {
 			return err
 		}
 		if createBackup {
 			fmt.Printf("Backup file created at '%s.bak'.\n", path)
-			fmt.Println("You can delete the backup file if it's not needed.")
 		}
+		return nil
+	}
+
+	fmt.Printf("Processing directory: %s\n", path)
+
+	// Collect file paths first, then process in parallel
+	var files []string
+	err = filepath.WalkDir(path, func(walkPath string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				fmt.Fprintf(os.Stderr, "Warning: Skipping directory '%s' due to error: %v\n", walkPath, err)
+				return filepath.SkipDir
+			}
+			fmt.Fprintf(os.Stderr, "Warning: Skipping file '%s' due to error: %v\n", walkPath, err)
+			return nil
+		}
+
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == ".svn" || name == ".hg" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Skip .bak files to avoid processing backups
+		if strings.HasSuffix(d.Name(), ".bak") {
+			return nil
+		}
+
+		files = append(files, walkPath)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("error walking directory: %w", err)
+	}
+
+	// Process files in parallel using a worker pool
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+	if len(files) < numWorkers {
+		numWorkers = len(files)
+	}
+
+	var errCount atomic.Int64
+	fileCh := make(chan string, numWorkers)
+	var wg sync.WaitGroup
+
+	for range numWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range fileCh {
+				if err := processFile(f, oldText, newText, createBackup, maxFileSize); err != nil && err != errNoChange {
+					fmt.Fprintf(os.Stderr, "Error processing '%s': %v\n", f, err)
+					errCount.Add(1)
+				}
+			}
+		}()
+	}
+
+	for _, f := range files {
+		fileCh <- f
+	}
+	close(fileCh)
+	wg.Wait()
+
+	fmt.Printf("\nFinished processing directory '%s'.\n", path)
+	if errCount.Load() > 0 {
+		fmt.Fprintf(os.Stderr, "%d file(s) had errors during processing.\n", errCount.Load())
+	}
+	if createBackup {
+		fmt.Println("Backup files (.bak) were created for all modified files.")
 	}
 
 	return nil
 }
 
-// unescapeString converts escaped sequences like \\n to actual characters
+// unescapeString converts escaped sequences like \n to actual characters.
+// Processes character-by-character to handle \\ correctly.
 func unescapeString(s string) string {
-	// Handle common escape sequences
-	s = strings.ReplaceAll(s, "\\n", "\n")
-	s = strings.ReplaceAll(s, "\\t", "\t")
-	s = strings.ReplaceAll(s, "\\r", "\r")
-	s = strings.ReplaceAll(s, "\\\\", "\\")
-	return s
+	var b strings.Builder
+	b.Grow(len(s))
+
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+				i++
+			case 't':
+				b.WriteByte('\t')
+				i++
+			case 'r':
+				b.WriteByte('\r')
+				i++
+			case '\\':
+				b.WriteByte('\\')
+				i++
+			default:
+				b.WriteByte(s[i])
+			}
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+
+	return b.String()
 }
 
 func main() {
 	var createBackup bool
+	var maxFileSize int64
 
 	var rootCmd = &cobra.Command{
 		Use:   "replace-text [old-text] [new-text] [file-or-directory-path]",
@@ -153,16 +274,18 @@ Examples:
   replace-text '\\n' '\\r\\n' /path/to/file.txt  # Replace newlines with CRLF`,
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Un-escape the arguments (e.g. '\\n' becomes a newline character)
-			oldText := unescapeString(args[0])
-			newText := unescapeString(args[1])
+			oldText := []byte(unescapeString(args[0]))
+			newText := []byte(unescapeString(args[1]))
 			path := args[2]
 
-			return findAndReplace(path, oldText, newText, createBackup)
+			return findAndReplace(path, oldText, newText, createBackup, maxFileSize)
 		},
+		SilenceErrors: true,
+		SilenceUsage:  true,
 	}
 
 	rootCmd.Flags().BoolVar(&createBackup, "backup", false, "Create backup files (.bak) before replacing")
+	rootCmd.Flags().Int64Var(&maxFileSize, "max-size", defaultMaxFileSize, "Max file size in bytes to process (default 512MB)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
