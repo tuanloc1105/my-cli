@@ -19,10 +19,13 @@ Advanced file and directory finder with pattern matching, size filtering, and pa
 ### 5. **Replace Text** (`replace-text/`)
 Find and replace text in files or directories with automatic backup creation and support for multi-line replacements.
 
+### 6. **API Stress Test** (`api-stress-test/`)
+HTTP load and stress testing tool for APIs with performance metrics collection.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Go 1.21 or later
+- Go 1.24 or later
 - Git (for cloning)
 - [Powershell 7](https://github.com/PowerShell/PowerShell) - required only if you run these tools in Windows PowerShell. Ignore if you're using Command Prompt.
 
@@ -34,36 +37,22 @@ Find and replace text in files or directories with automatic backup creation and
    cd my-cli
    ```
 
-2. **Build all tools:**
+2. **Build and install all tools:**
    ```bash
-   # Build all tools at once
-   for dir in */; do
-     if [ -f "$dir/go.mod" ]; then
-       echo "Building $(basename "$dir")..."
-       cd "$dir"
-       go build -o "$(basename "$dir")" .
-       cd ..
-     fi
-   done
+   make all
    ```
 
 3. **Or build individual tools:**
    ```bash
-   # Case Converter
-   cd case-converter && go build -o case-converter . && cd ..
-   
-   # Check Folder Size
-   cd check-folder-size && go build -o check-folder-size . && cd ..
-   
-   # Find Content
-   cd find-content && go build -o find-content . && cd ..
-   
-   # Find Everything
-   cd find-everything && go build -o find-everything . && cd ..
-   
-   # Replace Text
-   cd replace-text && go build -o replace-text . && cd ..
+   make case-converter
+   make check-folder-size
+   make find-content
+   make find-everything
+   make replace-text
+   make api-stress-test
    ```
+
+   The Makefile supports both Linux and Windows (PowerShell 7 with MSYS2 `make`).
 
 ## 📖 Tool Documentation
 
@@ -218,24 +207,25 @@ my-cli/
 ├── check-folder-size/  # Disk usage analyzer
 ├── find-content/       # Text search tool
 ├── find-everything/    # Advanced file finder
-└── replace-text/       # Text replacement tool
+├── replace-text/       # Text replacement tool
+├── api-stress-test/    # API load/stress testing tool
+├── common-module/      # Shared utilities
+└── Makefile            # Build & install (Linux + Windows)
 ```
 
 ### Building from Source
-Each tool is self-contained with its own `go.mod` file:
+Each tool is self-contained with its own `go.mod` file and references `common-module` via a local `replace` directive.
 
+Use the Makefile to build and install:
 ```bash
-# Navigate to any tool directory
-cd case-converter
+# Build all
+make all
 
-# Install dependencies
-go mod tidy
+# Build one tool
+make find-content
 
-# Build
-go build -o case-converter .
-
-# Run
-./case-converter "hello world"
+# Clean build artifacts
+make clean
 ```
 
 ### Dependencies
