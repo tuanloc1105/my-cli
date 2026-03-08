@@ -6,8 +6,11 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"find-everything/internal/types"
 )
 
 // Colors for terminal output
@@ -73,7 +76,22 @@ func FormatSize(sizeBytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(sizeBytes)/float64(div), "KMGTPE"[exp])
 }
 
-func SaveResultsToFile(files, dirs []string, pattern, basePath string, showDetails bool) string {
+// sortResults sorts files and dirs in parallel.
+func sortResults(files []types.FileResult, dirs []string) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	}()
+	go func() {
+		defer wg.Done()
+		sort.Strings(dirs)
+	}()
+	wg.Wait()
+}
+
+func SaveResultsToFile(files []types.FileResult, dirs []string, pattern, basePath string, showDetails bool, noSort bool) string {
 	timestamp := time.Now().Format("20060102_150405")
 	filename := fmt.Sprintf("search_results_%s.txt", timestamp)
 
@@ -96,19 +114,18 @@ func SaveResultsToFile(files, dirs []string, pattern, basePath string, showDetai
 	fmt.Fprintf(writer, "Total results: %d\n", len(files)+len(dirs))
 	fmt.Fprintf(writer, "%s\n\n", strings.Repeat("=", 80))
 
+	if !noSort {
+		sortResults(files, dirs)
+	}
+
 	if len(files) > 0 {
 		fmt.Fprintf(writer, "MATCHING FILES:\n")
 		fmt.Fprintf(writer, "%s\n", strings.Repeat("-", 40))
-		sort.Strings(files)
-		for _, filePath := range files {
+		for _, f := range files {
 			if showDetails {
-				if info, err := os.Stat(filePath); err == nil {
-					fmt.Fprintf(writer, "  %s (%s)\n", filePath, FormatSize(info.Size()))
-				} else {
-					fmt.Fprintf(writer, "  %s (size unknown)\n", filePath)
-				}
+				fmt.Fprintf(writer, "  %s (%s)\n", f.Path, FormatSize(f.Size))
 			} else {
-				fmt.Fprintf(writer, "  %s\n", filePath)
+				fmt.Fprintf(writer, "  %s\n", f.Path)
 			}
 		}
 		fmt.Fprintf(writer, "\n")
@@ -117,7 +134,6 @@ func SaveResultsToFile(files, dirs []string, pattern, basePath string, showDetai
 	if len(dirs) > 0 {
 		fmt.Fprintf(writer, "MATCHING DIRECTORIES:\n")
 		fmt.Fprintf(writer, "%s\n", strings.Repeat("-", 40))
-		sort.Strings(dirs)
 		for _, dirPath := range dirs {
 			fmt.Fprintf(writer, "  %s\n", dirPath)
 		}
@@ -127,12 +143,12 @@ func SaveResultsToFile(files, dirs []string, pattern, basePath string, showDetai
 	return filename
 }
 
-func PrintResults(files, dirs []string, showDetails bool, pattern, basePath string) {
+func PrintResults(files []types.FileResult, dirs []string, showDetails bool, pattern, basePath string, noSort bool) {
 	totalResults := len(files) + len(dirs)
 
 	// If results exceed 100, save to file instead of printing
 	if totalResults > 100 {
-		filename := SaveResultsToFile(files, dirs, pattern, basePath, showDetails)
+		filename := SaveResultsToFile(files, dirs, pattern, basePath, showDetails, noSort)
 		fmt.Printf("\n%s%sSearch Results:%s\n", ColorBold, ColorHeader, ColorEndC)
 		fmt.Printf("%sFiles found: %d%s\n", ColorOKGreen, len(files), ColorEndC)
 		fmt.Printf("%sDirectories found: %d%s\n", ColorOKBlue, len(dirs), ColorEndC)
@@ -146,25 +162,23 @@ func PrintResults(files, dirs []string, showDetails bool, pattern, basePath stri
 	fmt.Printf("%sFiles found: %d%s\n", ColorOKGreen, len(files), ColorEndC)
 	fmt.Printf("%sDirectories found: %d%s\n", ColorOKBlue, len(dirs), ColorEndC)
 
+	if !noSort {
+		sortResults(files, dirs)
+	}
+
 	if len(files) > 0 {
 		fmt.Printf("\n%s%sMatching Files:%s\n", ColorBold, ColorOKGreen, ColorEndC)
-		sort.Strings(files)
-		for _, filePath := range files {
+		for _, f := range files {
 			if showDetails {
-				if info, err := os.Stat(filePath); err == nil {
-					fmt.Printf("  %s (%s)\n", filePath, FormatSize(info.Size()))
-				} else {
-					fmt.Printf("  %s (size unknown)\n", filePath)
-				}
+				fmt.Printf("  %s (%s)\n", f.Path, FormatSize(f.Size))
 			} else {
-				fmt.Printf("  %s\n", filePath)
+				fmt.Printf("  %s\n", f.Path)
 			}
 		}
 	}
 
 	if len(dirs) > 0 {
 		fmt.Printf("\n%s%sMatching Directories:%s\n", ColorBold, ColorOKBlue, ColorEndC)
-		sort.Strings(dirs)
 		for _, dirPath := range dirs {
 			fmt.Printf("  %s\n", dirPath)
 		}

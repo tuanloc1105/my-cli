@@ -2,13 +2,14 @@ package finder
 
 import (
 	"context"
-	"find-everything/internal/ui"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
+
+	"find-everything/internal/ui"
 )
 
 // FinderOptions holds all configuration for FileFinder
@@ -22,6 +23,7 @@ type FinderOptions struct {
 	MaxSize         int64
 	ShowProgress    bool
 	MaxResults      int
+	NoSort          bool
 }
 
 // FileFinder handles file and directory searching
@@ -37,12 +39,12 @@ type FileFinder struct {
 	maxSize         int64
 	showProgress    bool
 	maxResults      int
+	noSort          bool
 	progressTracker *ui.ProgressTracker
 	patternRegex    *regexp.Regexp
+	fastMatch       func(string) bool
 	ctx             context.Context
 	cancel          context.CancelFunc
-	mu              sync.RWMutex
-	fileCache       map[string]int64 // Cache file sizes to avoid repeated stat calls
 }
 
 func NewFileFinder(basePath, pattern string, opts FinderOptions) (*FileFinder, error) {
@@ -84,6 +86,9 @@ func NewFileFinder(basePath, pattern string, opts FinderOptions) (*FileFinder, e
 		maxWorkers = 1
 	}
 
+	// Build fast matcher for simple glob patterns
+	fastMatch := buildFastMatcher(pattern, opts.CaseSensitive)
+
 	return &FileFinder{
 		basePath:        basePath,
 		pattern:         pattern,
@@ -96,84 +101,128 @@ func NewFileFinder(basePath, pattern string, opts FinderOptions) (*FileFinder, e
 		maxSize:         opts.MaxSize,
 		showProgress:    opts.ShowProgress,
 		maxResults:      opts.MaxResults,
+		noSort:          opts.NoSort,
 		progressTracker: ui.NewProgressTracker(),
 		patternRegex:    patternRegex,
+		fastMatch:       fastMatch,
 		ctx:             ctx,
 		cancel:          cancel,
-		fileCache:       make(map[string]int64),
 	}, nil
 }
 
-func (ff *FileFinder) ShouldExclude(path string) bool {
-	// Check if any component of the path matches an excluded directory name
-	parts := strings.Split(path, string(os.PathSeparator))
-	for _, part := range parts {
-		if ff.excludeDirs[strings.ToLower(part)] {
-			return true
-		}
-	}
+// ShouldExcludeDir checks if a directory should be excluded by name.
+// Only needs the directory's own name — parent directories were already
+// checked during traversal, so excluded parents are never queued.
+func (ff *FileFinder) ShouldExcludeDir(dirName string) bool {
+	return ff.excludeDirs[strings.ToLower(dirName)]
+}
 
-	// Check exclude patterns (regex)
+// ShouldExcludeByPattern checks if a file should be excluded via regex patterns.
+func (ff *FileFinder) ShouldExcludeByPattern(fullPath string) bool {
 	for _, regex := range ff.excludePatterns {
-		if regex.MatchString(path) {
+		if regex.MatchString(fullPath) {
 			return true
 		}
 	}
-
 	return false
 }
 
 func (ff *FileFinder) MatchesPattern(name string) bool {
+	if ff.fastMatch != nil {
+		return ff.fastMatch(name)
+	}
 	return ff.patternRegex.MatchString(name)
 }
 
-func (ff *FileFinder) GetFileSize(filePath string) (int64, bool) {
-	// Check cache first
-	ff.mu.RLock()
-	if size, exists := ff.fileCache[filePath]; exists {
-		ff.mu.RUnlock()
-		return size, true
+// GetFileSizeFromEntry gets file size from a DirEntry.
+// For symlinks, falls back to os.Stat to follow the link and get the target size.
+func (ff *FileFinder) GetFileSizeFromEntry(entry fs.DirEntry, fullPath string) (int64, bool) {
+	// Symlink: entry.Info() returns symlink size, not target size
+	if entry.Type()&fs.ModeSymlink != 0 {
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
 	}
-	ff.mu.RUnlock()
-
-	// Get file info
-	info, err := os.Stat(filePath)
+	info, err := entry.Info()
 	if err != nil {
 		return 0, false
 	}
-	size := info.Size()
-
-	// Cache the result with size limit to prevent memory explosion
-	ff.mu.Lock()
-	if len(ff.fileCache) < 10000 { // Limit cache size
-		ff.fileCache[filePath] = size
-	}
-	ff.mu.Unlock()
-
-	return size, true
+	return info.Size(), true
 }
 
-func (ff *FileFinder) CheckFileSize(filePath string) bool {
-	size, ok := ff.GetFileSize(filePath)
+// CheckFileSize validates file size against min/max bounds using DirEntry.
+// Returns (size, passedFilter).
+func (ff *FileFinder) CheckFileSize(entry fs.DirEntry, fullPath string) (int64, bool) {
+	size, ok := ff.GetFileSizeFromEntry(entry, fullPath)
 	if !ok {
-		return false
+		return 0, false
 	}
-	return size >= ff.minSize && size <= ff.maxSize
+	return size, size >= ff.minSize && size <= ff.maxSize
 }
 
-func (ff *FileFinder) CheckFileType(filePath string) bool {
+func (ff *FileFinder) CheckFileType(entryName string) bool {
 	if len(ff.fileTypes) == 0 {
 		return true
 	}
-	ext := strings.ToLower(filepath.Ext(filePath))
+	ext := strings.ToLower(filepath.Ext(entryName))
 	return ff.fileTypes[ext]
 }
 
 // Utility functions
+
 func GlobToRegex(pattern string) string {
-	// Simple glob to regex conversion
 	pattern = regexp.QuoteMeta(pattern)
 	pattern = strings.ReplaceAll(pattern, "\\*", ".*")
 	pattern = strings.ReplaceAll(pattern, "\\?", ".")
 	return "^" + pattern + "$"
 }
+
+// buildFastMatcher detects simple glob patterns and returns a fast
+// string-based matcher. Returns nil for complex patterns (fallback to regex).
+func buildFastMatcher(pattern string, caseSensitive bool) func(string) bool {
+	// Case 1: "*.ext" — suffix match
+	if strings.HasPrefix(pattern, "*") && !strings.ContainsAny(pattern[1:], "*?[]{}") {
+		suffix := pattern[1:] // e.g. ".txt"
+		if !caseSensitive {
+			suffix = strings.ToLower(suffix)
+			return func(name string) bool {
+				return strings.HasSuffix(strings.ToLower(name), suffix)
+			}
+		}
+		return func(name string) bool {
+			return strings.HasSuffix(name, suffix)
+		}
+	}
+
+	// Case 2: "prefix*" — prefix match
+	if strings.HasSuffix(pattern, "*") && !strings.ContainsAny(pattern[:len(pattern)-1], "*?[]{}") {
+		prefix := pattern[:len(pattern)-1]
+		if !caseSensitive {
+			prefix = strings.ToLower(prefix)
+			return func(name string) bool {
+				return strings.HasPrefix(strings.ToLower(name), prefix)
+			}
+		}
+		return func(name string) bool {
+			return strings.HasPrefix(name, prefix)
+		}
+	}
+
+	// Case 3: no wildcards — exact match
+	if !strings.ContainsAny(pattern, "*?[]{}") {
+		if !caseSensitive {
+			lower := strings.ToLower(pattern)
+			return func(name string) bool {
+				return strings.ToLower(name) == lower
+			}
+		}
+		return func(name string) bool {
+			return name == pattern
+		}
+	}
+
+	return nil // complex pattern, fallback to regex
+}
+

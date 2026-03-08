@@ -3,15 +3,19 @@ package finder
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"find-everything/internal/types"
 	"find-everything/internal/ui"
 )
 
-func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
+var pathSep = string(os.PathSeparator)
+
+func (ff *FileFinder) FindFilesAndDirs() ([]types.FileResult, []string) {
+	defer ff.cancel()
+
 	if ff.showProgress {
 		fmt.Printf("%sStarting search...%s\n", ui.ColorOKBlue, ui.ColorEndC)
 	}
@@ -33,7 +37,7 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 		}()
 	}
 
-	var matchedFiles []string
+	var matchedFiles []types.FileResult
 	var matchedDirs []string
 	var resultsMu sync.Mutex
 
@@ -48,13 +52,16 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 	var totalDirs int64
 	var skippedDirs int64
 
+	hasExcludePatterns := len(ff.excludePatterns) > 0
+	hasSizeFilter := ff.minSize > 0 || ff.maxSize < (1<<63-1)
+
 	// Start workers
 	for i := 0; i < ff.maxWorkers; i++ {
 		workerWg.Add(1)
 		go func() {
 			defer workerWg.Done()
 
-			localFiles := make([]string, 0, 100)
+			localFiles := make([]types.FileResult, 0, 100)
 			localDirs := make([]string, 0, 100)
 
 			// Helper to flush local results
@@ -80,7 +87,7 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 			defer flush()
 
 			for path := range dirQueue {
-				processDir(ff, path, dirQueue, &processingWg, &localFiles, &localDirs, &totalDirs, &skippedDirs)
+				processDir(ff, path, dirQueue, &processingWg, &localFiles, &localDirs, &totalDirs, &skippedDirs, hasExcludePatterns, hasSizeFilter)
 
 				// Flush periodically
 				if len(localFiles)+len(localDirs) > 100 {
@@ -120,7 +127,7 @@ func (ff *FileFinder) FindFilesAndDirs() ([]string, []string) {
 	return matchedFiles, matchedDirs
 }
 
-func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.WaitGroup, localFiles *[]string, localDirs *[]string, totalDirs *int64, skippedDirs *int64) {
+func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.WaitGroup, localFiles *[]types.FileResult, localDirs *[]string, totalDirs *int64, skippedDirs *int64, hasExcludePatterns bool, hasSizeFilter bool) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		atomic.AddInt64(skippedDirs, 1)
@@ -129,15 +136,28 @@ func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.Wait
 
 	ff.progressTracker.UpdateProcessedDirs(1)
 
+	var newDirCount int64
+
 	for _, entry := range entries {
 		entryName := entry.Name()
-		fullPath := filepath.Join(path, entryName)
+		isDir := entry.IsDir()
 
-		if ff.ShouldExclude(fullPath) {
-			continue
+		// Exclude dirs: fast map lookup on entry name only
+		if isDir {
+			if ff.ShouldExcludeDir(entryName) {
+				continue
+			}
 		}
 
-		isDir := entry.IsDir()
+		// Phase 3a: Avoid filepath.Join — direct string concat
+		fullPath := path + pathSep + entryName
+
+		// Exclude patterns (regex): applies to both files and directories
+		if hasExcludePatterns {
+			if ff.ShouldExcludeByPattern(fullPath) {
+				continue
+			}
+		}
 
 		// Check for match
 		if ff.MatchesPattern(entryName) {
@@ -146,16 +166,25 @@ func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.Wait
 				ff.progressTracker.Update(0, 1)
 			} else {
 				shouldAdd := true
-				if !ff.CheckFileType(fullPath) {
+
+				// Phase 3c: CheckFileType uses entryName instead of fullPath
+				if !ff.CheckFileType(entryName) {
 					shouldAdd = false
-				} else if ff.minSize > 0 || ff.maxSize < (1<<63-1) {
-					if !ff.CheckFileSize(fullPath) {
+				} else if hasSizeFilter {
+					size, ok := ff.CheckFileSize(entry, fullPath)
+					if !ok {
 						shouldAdd = false
+					} else if shouldAdd {
+						*localFiles = append(*localFiles, types.FileResult{Path: fullPath, Size: size})
+						ff.progressTracker.Update(1, 0)
+						shouldAdd = false // already added
 					}
 				}
 
 				if shouldAdd {
-					*localFiles = append(*localFiles, fullPath)
+					// No size filter — get size for display
+					size, _ := ff.GetFileSizeFromEntry(entry, fullPath)
+					*localFiles = append(*localFiles, types.FileResult{Path: fullPath, Size: size})
 					ff.progressTracker.Update(1, 0)
 				}
 			}
@@ -167,15 +196,11 @@ func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.Wait
 			case <-ff.ctx.Done():
 				return
 			default:
-				atomic.AddInt64(totalDirs, 1)
-				ff.progressTracker.SetTotalDirs(int(atomic.LoadInt64(totalDirs)))
+				newDirCount++
 
 				wg.Add(1)
 
-				// Non-blocking send to prevent deadlock: all workers are both
-				// producers and consumers of dirQueue. If channel is full and
-				// all workers block on send, nobody consumes → deadlock.
-				// Fallback goroutine keeps the worker free to continue consuming.
+				// Non-blocking send to prevent deadlock
 				select {
 				case dirQueue <- fullPath:
 				default:
@@ -185,5 +210,11 @@ func processDir(ff *FileFinder, path string, dirQueue chan string, wg *sync.Wait
 				}
 			}
 		}
+	}
+
+	// Phase 4a: Batch update progress counter
+	if newDirCount > 0 {
+		newTotal := atomic.AddInt64(totalDirs, newDirCount)
+		ff.progressTracker.SetTotalDirs(int(newTotal))
 	}
 }

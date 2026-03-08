@@ -26,6 +26,7 @@ func Execute() {
 		maxResults      int
 		noProgress      bool
 		showDetails     bool
+		noSort          bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -83,6 +84,7 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 				MaxSize:         maxSizeBytes,
 				MaxResults:      maxResults,
 				ShowProgress:    !noProgress,
+				NoSort:          noSort,
 			}
 
 			f, err := finder.NewFileFinder(basePath, pattern, options)
@@ -91,7 +93,7 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 			}
 
 			files, dirs := f.FindFilesAndDirs()
-			ui.PrintResults(files, dirs, showDetails, pattern, basePath)
+			ui.PrintResults(files, dirs, showDetails, pattern, basePath, noSort)
 
 			return nil
 		},
@@ -108,6 +110,7 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 	rootCmd.Flags().IntVar(&maxResults, "max-results", 10000, "Maximum number of results to find")
 	rootCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress display")
 	rootCmd.Flags().BoolVarP(&showDetails, "show-details", "d", false, "Show file sizes and details")
+	rootCmd.Flags().BoolVar(&noSort, "no-sort", false, "Skip sorting results (faster for large result sets)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Printf("%sError: %v%s\n", ui.ColorFail, err, ui.ColorEndC)
