@@ -12,14 +12,15 @@ import (
 // The collector maintains latency data for percentile calculations and
 // tracks success/failure counts and HTTP status code distribution.
 type Collector struct {
-	mu            sync.Mutex    // Protects all fields from concurrent access
-	successes     int64         // Count of successful requests (2xx status)
-	failures      int64         // Count of failed requests
-	latencies     []float64     // All recorded latencies (for percentile calculation)
-	statusCount   map[int]int   // Distribution of HTTP status codes
-	minLatency    float64       // Minimum observed latency
-	maxLatency    float64       // Maximum observed latency
-	firstLatency  bool          // Flag to initialize min/max on first record
+	mu            sync.Mutex      // Protects all fields from concurrent access
+	successes     int64           // Count of successful requests (2xx status)
+	failures      int64           // Count of failed requests
+	latencies     []float64       // All recorded latencies (for percentile calculation)
+	statusCount   map[int]int     // Distribution of HTTP status codes
+	errorMessages map[string]int  // Error message frequency
+	minLatency    float64         // Minimum observed latency
+	maxLatency    float64         // Maximum observed latency
+	firstLatency  bool            // Flag to initialize min/max on first record
 }
 
 // NewCollector creates a new statistics collector with pre-allocated capacity.
@@ -27,24 +28,25 @@ type Collector struct {
 // space for the expected number of latency records.
 func NewCollector(initialCapacity int) *Collector {
 	return &Collector{
-		latencies:   make([]float64, 0, initialCapacity),
-		statusCount: make(map[int]int),
-		firstLatency: true,
+		latencies:     make([]float64, 0, initialCapacity),
+		statusCount:   make(map[int]int),
+		errorMessages: make(map[string]int),
+		firstLatency:  true,
 	}
 }
 
 // Record adds a request result to the collector in a thread-safe manner.
-// It updates success/failure counts, latency tracking, and status code distribution.
-func (c *Collector) Record(statusCode int, elapsed float64, ok bool) {
+// It updates success/failure counts, latency tracking, status code distribution,
+// and error message tracking.
+func (c *Collector) Record(statusCode int, elapsed float64, ok bool, errorMsg string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.latencies = append(c.latencies, elapsed)
-	// Track HTTP status code distribution (status code 0 indicates request errors)
-	if statusCode != 0 {
-		c.statusCount[statusCode]++
-	} else {
-		c.statusCount[0]++
+	c.statusCount[statusCode]++
+
+	if errorMsg != "" {
+		c.errorMessages[errorMsg]++
 	}
 
 	// Track min/max latency in real-time
@@ -68,19 +70,26 @@ func (c *Collector) Record(statusCode int, elapsed float64, ok bool) {
 	}
 }
 
+// ErrorEntry represents an error message and its occurrence count.
+type ErrorEntry struct {
+	Message string `json:"message"`
+	Count   int    `json:"count"`
+}
+
 // Statistics holds the calculated final statistics from a stress test run.
 // All latency values are in seconds.
 type Statistics struct {
-	Successes      int64             // Total successful requests
-	Failures       int64             // Total failed requests
-	Total          int               // Total requests processed
-	StatusCount    map[int]int       // Distribution of HTTP status codes
-	MinLatency     float64           // Minimum latency in seconds
-	MaxLatency     float64           // Maximum latency in seconds
-	AvgLatency     float64           // Average latency in seconds
-	P50Latency     float64           // 50th percentile (median) latency in seconds
-	P90Latency     float64           // 90th percentile latency in seconds
-	P99Latency     float64           // 99th percentile latency in seconds
+	Successes   int64        `json:"successes"`
+	Failures    int64        `json:"failures"`
+	Total       int          `json:"total"`
+	StatusCount map[int]int  `json:"status_count"`
+	MinLatency  float64      `json:"min_latency"`
+	MaxLatency  float64      `json:"max_latency"`
+	AvgLatency  float64      `json:"avg_latency"`
+	P50Latency  float64      `json:"p50_latency"`
+	P90Latency  float64      `json:"p90_latency"`
+	P99Latency  float64      `json:"p99_latency"`
+	TopErrors   []ErrorEntry `json:"top_errors,omitempty"`
 }
 
 // GetStatistics calculates and returns final statistics from all collected results.
@@ -93,7 +102,7 @@ func (c *Collector) GetStatistics() Statistics {
 
 	if len(c.latencies) == 0 {
 		return Statistics{
-			StatusCount: c.statusCount,
+			StatusCount: make(map[int]int),
 		}
 	}
 
@@ -120,6 +129,18 @@ func (c *Collector) GetStatistics() Statistics {
 		statusCountCopy[k] = v
 	}
 
+	// Collect top errors sorted by frequency (max 5)
+	var topErrors []ErrorEntry
+	for msg, count := range c.errorMessages {
+		topErrors = append(topErrors, ErrorEntry{Message: msg, Count: count})
+	}
+	sort.Slice(topErrors, func(i, j int) bool {
+		return topErrors[i].Count > topErrors[j].Count
+	})
+	if len(topErrors) > 5 {
+		topErrors = topErrors[:5]
+	}
+
 	return Statistics{
 		Successes:   c.successes,
 		Failures:    c.failures,
@@ -131,6 +152,7 @@ func (c *Collector) GetStatistics() Statistics {
 		P50Latency:  p50,
 		P90Latency:  p90,
 		P99Latency:  p99,
+		TopErrors:   topErrors,
 	}
 }
 

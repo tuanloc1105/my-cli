@@ -24,8 +24,10 @@ type Result struct {
 	Error      string  // Error message if request failed
 }
 
-// ParseHeaders parses HTTP headers from a comma-separated string format.
-// Expected format: 'key1:value1,key2:value2'
+// ParseHeaders parses HTTP headers from a semicolon-separated string format.
+// Expected format: 'key1:value1;key2:value2'
+// Semicolons are used as delimiters to allow commas in header values
+// (e.g., 'Accept:text/html,application/json;Authorization:Bearer token').
 // Returns an empty map if the input string is empty.
 // Invalid entries (missing colon) are silently skipped.
 func ParseHeaders(raw string) map[string]string {
@@ -34,7 +36,7 @@ func ParseHeaders(raw string) map[string]string {
 		return headers
 	}
 
-	parts := strings.Split(raw, ",")
+	parts := strings.Split(raw, ";")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
