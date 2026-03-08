@@ -2,13 +2,76 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
+
+// matchResult represents a single search match
+type matchResult struct {
+	lineNum int
+	endLine int
+	content string
+}
+
+// searchMatcher holds pre-compiled search state to avoid per-line/per-file recomputation
+type searchMatcher struct {
+	regex         *regexp.Regexp
+	keyword       string
+	lowerKeyword  string
+	searchPattern string // multiline: \n converted to actual newlines
+	lowerPattern  string // multiline case-insensitive
+	caseSensitive bool
+}
+
+func newSearchMatcher(keyword string, useRegex, caseSensitive, multiline bool) (*searchMatcher, error) {
+	sm := &searchMatcher{
+		keyword:       keyword,
+		caseSensitive: caseSensitive,
+	}
+
+	if multiline {
+		sm.searchPattern = strings.ReplaceAll(keyword, "\\n", "\n")
+		if !caseSensitive {
+			sm.lowerPattern = strings.ToLower(sm.searchPattern)
+		}
+		if useRegex {
+			flags := ""
+			if !caseSensitive {
+				flags = "(?i)"
+			}
+			re, err := regexp.Compile(flags + sm.searchPattern)
+			if err != nil {
+				return nil, err
+			}
+			sm.regex = re
+		}
+	} else {
+		if useRegex {
+			flags := ""
+			if !caseSensitive {
+				flags = "(?i)"
+			}
+			re, err := regexp.Compile(flags + keyword)
+			if err != nil {
+				return nil, err
+			}
+			sm.regex = re
+		} else if !caseSensitive {
+			sm.lowerKeyword = strings.ToLower(keyword)
+		}
+	}
+
+	return sm, nil
+}
 
 // FileSearcher handles file content searching operations
 type FileSearcher struct {
@@ -39,19 +102,20 @@ func NewFileSearcher(caseSensitive, suppressWarnings, searchAll bool, fileExtens
 		fs.excludeDirs[dir] = true
 	}
 
-	// Add custom excluded directories
 	for _, dir := range excludeDirs {
 		fs.excludeDirs[dir] = true
 	}
 
-	// Add custom excluded files
 	for _, file := range excludeFiles {
 		fs.excludeFiles[file] = true
 	}
 
-	// Add custom file extensions
 	for _, ext := range fileExtensions {
-		fs.fileExtensions[strings.ToLower(ext)] = true
+		e := strings.ToLower(ext)
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		fs.fileExtensions[e] = true
 	}
 
 	// Common text file extensions
@@ -70,19 +134,18 @@ func NewFileSearcher(caseSensitive, suppressWarnings, searchAll bool, fileExtens
 
 // isTextFile checks if a file is likely a text file
 func (fs *FileSearcher) isTextFile(filePath string) bool {
-	// If searchAll is enabled, attempt to read any file as text
 	if fs.searchAll {
 		return true
 	}
 
 	ext := strings.ToLower(filepath.Ext(filePath))
 
-	// Check explicit extensions first
-	if len(fs.fileExtensions) > 0 && !fs.fileExtensions[ext] {
-		return false
+	// If explicit extensions specified, use only those
+	if len(fs.fileExtensions) > 0 {
+		return fs.fileExtensions[ext]
 	}
 
-	// Check if it's a known text extension
+	// Otherwise fall back to known text extensions
 	return fs.textExtensions[ext]
 }
 
@@ -96,31 +159,37 @@ func (fs *FileSearcher) shouldSkipFile(fileName string) bool {
 	return fs.excludeFiles[fileName]
 }
 
-// searchInFile searches for keyword in a single file
-func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex, multiline bool) []struct {
-	lineNum int
-	endLine int
-	content string
-} {
-	var matches []struct {
-		lineNum int
-		endLine int
-		content string
-	}
-
+// searchInFile searches for keyword in a single file using a pre-compiled matcher
+func (fs *FileSearcher) searchInFile(filePath string, matcher *searchMatcher, multiline bool) []matchResult {
 	file, err := os.Open(filePath)
 	if err != nil {
 		if !fs.suppressWarnings {
 			fmt.Fprintf(os.Stderr, "Warning: Could not read %s: %v\n", filePath, err)
 		}
-		return matches
+		return nil
 	}
 	defer file.Close()
 
 	if multiline {
-		return fs.searchInFileMultiline(filePath, file, keyword, useRegex)
+		return fs.searchInFileMultiline(filePath, file, matcher)
 	}
 
+	// Binary file detection for --all mode (stack-allocated buffer)
+	if fs.searchAll {
+		var preview [512]byte
+		n, err := file.Read(preview[:])
+		if err != nil && err != io.EOF {
+			return nil
+		}
+		if bytes.IndexByte(preview[:n], 0) != -1 {
+			return nil // binary file, skip
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil
+		}
+	}
+
+	var matches []matchResult
 	scanner := bufio.NewScanner(file)
 	lineNum := 1
 
@@ -128,35 +197,16 @@ func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex, multili
 		line := scanner.Text()
 		var matched bool
 
-		if useRegex {
-			flags := regexp.MustCompilePOSIX("")
-			if !fs.caseSensitive {
-				flags = regexp.MustCompilePOSIX("(?i)")
-			}
-			re, err := regexp.CompilePOSIX(flags.String() + keyword)
-			if err != nil {
-				if !fs.suppressWarnings {
-					fmt.Fprintf(os.Stderr, "Warning: Invalid regex pattern: %v\n", err)
-				}
-				return matches
-			}
-			matched = re.MatchString(line)
+		if matcher.regex != nil {
+			matched = matcher.regex.MatchString(line)
+		} else if matcher.caseSensitive {
+			matched = strings.Contains(line, matcher.keyword)
 		} else {
-			searchLine := line
-			searchKeyword := keyword
-			if !fs.caseSensitive {
-				searchLine = strings.ToLower(line)
-				searchKeyword = strings.ToLower(keyword)
-			}
-			matched = strings.Contains(searchLine, searchKeyword)
+			matched = strings.Contains(strings.ToLower(line), matcher.lowerKeyword)
 		}
 
 		if matched {
-			matches = append(matches, struct {
-				lineNum int
-				endLine int
-				content string
-			}{lineNum, lineNum, line})
+			matches = append(matches, matchResult{lineNum, lineNum, line})
 		}
 		lineNum++
 	}
@@ -171,105 +221,76 @@ func (fs *FileSearcher) searchInFile(filePath, keyword string, useRegex, multili
 }
 
 // searchInFileMultiline searches for multiline keyword in a single file
-func (fs *FileSearcher) searchInFileMultiline(filePath string, file *os.File, keyword string, useRegex bool) []struct {
-	lineNum int
-	endLine int
-	content string
-} {
-	var matches []struct {
-		lineNum int
-		endLine int
-		content string
-	}
-
-	// Convert escaped newlines to actual newlines
-	searchPattern := strings.ReplaceAll(keyword, "\\n", "\n")
-
-	// Read file content and normalize line endings (Windows \r\n -> Unix \n)
+func (fs *FileSearcher) searchInFileMultiline(filePath string, file *os.File, matcher *searchMatcher) []matchResult {
 	contentBytes, err := io.ReadAll(file)
 	if err != nil {
 		if !fs.suppressWarnings {
 			fmt.Fprintf(os.Stderr, "Warning: Could not read %s: %v\n", filePath, err)
 		}
-		return matches
+		return nil
 	}
 
-	// Normalize Windows line endings to Unix line endings for consistent searching
+	// Binary detection for --all mode (check already-read content, no double read)
+	if fs.searchAll && bytes.IndexByte(contentBytes, 0) != -1 {
+		return nil
+	}
+
+	// Normalize Windows line endings to Unix line endings
 	content := strings.ReplaceAll(string(contentBytes), "\r\n", "\n")
 
-	var searchContent string
-	var searchPatternLower string
-
-	if !fs.caseSensitive {
-		searchContent = strings.ToLower(content)
-		searchPatternLower = strings.ToLower(searchPattern)
-	} else {
-		searchContent = content
-		searchPatternLower = searchPattern
+	type position struct {
+		start, end int
 	}
+	var foundPositions []position
 
-	var foundPositions []struct {
-		start int
-		end   int
-	}
-
-	if useRegex {
-		flags := ""
-		if !fs.caseSensitive {
-			flags = "(?i)"
-		}
-		re, err := regexp.Compile(flags + searchPattern)
-		if err != nil {
-			if !fs.suppressWarnings {
-				fmt.Fprintf(os.Stderr, "Warning: Invalid regex pattern: %v\n", err)
-			}
-			return matches
-		}
-		matchesRegex := re.FindAllStringIndex(content, -1)
-		for _, match := range matchesRegex {
-			foundPositions = append(foundPositions, struct {
-				start int
-				end   int
-			}{match[0], match[1]})
+	if matcher.regex != nil {
+		for _, m := range matcher.regex.FindAllStringIndex(content, -1) {
+			foundPositions = append(foundPositions, position{m[0], m[1]})
 		}
 	} else {
-		idx := strings.Index(searchContent, searchPatternLower)
-		patternLen := len(searchPatternLower)
+		searchContent := content
+		pattern := matcher.searchPattern
+		if !matcher.caseSensitive {
+			searchContent = strings.ToLower(content)
+			pattern = matcher.lowerPattern
+		}
+		patternLen := len(pattern)
+		idx := strings.Index(searchContent, pattern)
 		for idx != -1 {
-			foundPositions = append(foundPositions, struct {
-				start int
-				end   int
-			}{idx, idx + patternLen})
-			if idx+patternLen >= len(searchContent) {
+			foundPositions = append(foundPositions, position{idx, idx + patternLen})
+			nextStart := idx + patternLen
+			if nextStart >= len(searchContent) {
 				break
 			}
-			nextIdx := strings.Index(searchContent[idx+patternLen:], searchPatternLower)
+			nextIdx := strings.Index(searchContent[nextStart:], pattern)
 			if nextIdx == -1 {
 				break
 			}
-			idx = idx + patternLen + nextIdx
+			idx = nextStart + nextIdx
 		}
 	}
 
-	// Convert character positions to line numbers and build output
+	if len(foundPositions) == 0 {
+		return nil
+	}
+
+	// Incremental line number calculation: O(n) total instead of O(n*m)
+	matches := make([]matchResult, 0, len(foundPositions))
+	lastPos := 0
+	lastLine := 1
 	for _, pos := range foundPositions {
-		startLineNum := strings.Count(content[:pos.start], "\n") + 1
-		endLineNum := strings.Count(content[:pos.end], "\n") + 1
-
-		// Get the matched content and convert newlines to \n for display
+		lastLine += strings.Count(content[lastPos:pos.start], "\n")
+		startLineNum := lastLine
+		endLineNum := startLineNum + strings.Count(content[pos.start:pos.end], "\n")
 		matchedContent := strings.ReplaceAll(content[pos.start:pos.end], "\n", "\\n")
-
-		matches = append(matches, struct {
-			lineNum int
-			endLine int
-			content string
-		}{startLineNum, endLineNum, matchedContent})
+		matches = append(matches, matchResult{startLineNum, endLineNum, matchedContent})
+		lastPos = pos.start
 	}
 
 	return matches
 }
 
-// grepRecursive recursively searches for keyword in files
+// grepRecursive recursively searches for keyword in files using parallel workers
 func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex, multiline bool, showLineNumbers, showFilePath bool, maxResults *int) int {
 	info, err := os.Stat(rootDir)
 	if err != nil {
@@ -286,22 +307,86 @@ func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex, multili
 		return 0
 	}
 
-	totalMatches := 0
+	// Pre-compile search matcher once (regex + lowercase keyword)
+	matcher, err := newSearchMatcher(keyword, useRegex, fs.caseSensitive, multiline)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Invalid regex pattern: %v\n", err)
+		return 0
+	}
 
-	err = filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
-		// Handle permission errors or other errors during walk
+	// Buffered output to reduce syscalls
+	out := bufio.NewWriterSize(os.Stdout, 64*1024)
+	defer out.Flush()
+
+	// Parallel search with worker pool
+	numWorkers := runtime.NumCPU()
+	paths := make(chan string, numWorkers*4)
+	var totalMatches atomic.Int64
+	var maxReached atomic.Bool
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range paths {
+				if maxReached.Load() {
+					continue // drain channel
+				}
+
+				matches := fs.searchInFile(path, matcher, multiline)
+				if len(matches) == 0 {
+					continue
+				}
+
+				mu.Lock()
+				for _, match := range matches {
+					if maxResults != nil && int(totalMatches.Load()) >= *maxResults {
+						maxReached.Store(true)
+						break
+					}
+
+					if showFilePath {
+						out.WriteString(path)
+						out.WriteByte(':')
+					}
+					if showLineNumbers {
+						if multiline && match.lineNum != match.endLine {
+							out.WriteString(strconv.Itoa(match.lineNum))
+							out.WriteString("..")
+							out.WriteString(strconv.Itoa(match.endLine))
+						} else {
+							out.WriteString(strconv.Itoa(match.lineNum))
+						}
+						out.WriteByte(':')
+					}
+					out.WriteString(match.content)
+					out.WriteByte('\n')
+					totalMatches.Add(1)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+
+	// Walk directory tree and dispatch file paths to workers
+	filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsPermission(err) {
 				if !fs.suppressWarnings {
 					fmt.Fprintf(os.Stderr, "Warning: Permission denied: %s\n", path)
 				}
-				return nil // Skip this file/directory and continue
+				return nil
 			}
-			// For other errors, print warning and continue
 			if !fs.suppressWarnings {
 				fmt.Fprintf(os.Stderr, "Warning: Error accessing %s: %v\n", path, err)
 			}
 			return nil
+		}
+
+		if maxReached.Load() {
+			return filepath.SkipAll
 		}
 
 		if d.IsDir() {
@@ -319,41 +404,13 @@ func (fs *FileSearcher) grepRecursive(rootDir, keyword string, useRegex, multili
 			return nil
 		}
 
-		matches := fs.searchInFile(path, keyword, useRegex, multiline)
-
-		for _, match := range matches {
-			var outputParts []string
-
-			if showFilePath {
-				outputParts = append(outputParts, path)
-			}
-
-			if showLineNumbers {
-				if multiline && match.lineNum != match.endLine {
-					outputParts = append(outputParts, fmt.Sprintf("%d..%d", match.lineNum, match.endLine))
-				} else {
-					outputParts = append(outputParts, fmt.Sprintf("%d", match.lineNum))
-				}
-			}
-
-			outputParts = append(outputParts, match.content)
-
-			fmt.Println(strings.Join(outputParts, ":"))
-			totalMatches++
-
-			if maxResults != nil && totalMatches >= *maxResults {
-				return filepath.SkipAll
-			}
-		}
-
+		paths <- path
 		return nil
 	})
+	close(paths)
+	wg.Wait()
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error during search: %v\n", err)
-	}
-
-	return totalMatches
+	return int(totalMatches.Load())
 }
 
 // listDirectoryContents lists directory contents
