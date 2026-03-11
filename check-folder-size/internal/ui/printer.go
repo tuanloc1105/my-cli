@@ -2,10 +2,8 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 )
 
 type SizeInfo struct {
@@ -97,18 +95,24 @@ func PrintResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 	fmt.Printf("📈 Items Found: %d\n", len(subfolderSizes))
 	fmt.Printf("%s\n", strings.Repeat("=", 80))
 
-	// Initialize tabwriter for clean table output
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-
 	// Print table header
-	fmt.Fprintln(w, "Size\tUnit\tName")
-	fmt.Fprintln(w, "----\t----\t----")
+	const unitColWidth = 7 // max visible width: " bytes " = 7
+	fmt.Printf("%10s  %-*s  %s\n", "Size", unitColWidth, "Unit", "Name")
+	fmt.Printf("%10s  %-*s  %s\n", "----", unitColWidth, "----", "----")
 
 	// Print items
 	for _, item := range items {
 		formatted := formatSize(item.Size)
-		sizeStr := fmt.Sprintf("%.2f", formatted.Size)
+		sizeStr := fmt.Sprintf("%10.2f", formatted.Size)
 		unitStr := color(formatted.Unit, formatted.Color)
+
+		// Pad after colored unit to align Name column
+		// color() adds 1 space on each side, so visible width = len(unit) + 2
+		padCount := unitColWidth - (len(formatted.Unit) + 2)
+		padding := ""
+		if padCount > 0 {
+			padding = strings.Repeat(" ", padCount)
+		}
 
 		// Truncate long names (rune-safe for UTF-8)
 		displayName := item.Name
@@ -117,11 +121,8 @@ func PrintResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 			displayName = string(runes[:47]) + "..."
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\n", sizeStr, unitStr, displayName)
+		fmt.Printf("%s  %s%s  %s\n", sizeStr, unitStr, padding, displayName)
 	}
-
-	// Flush the buffer
-	w.Flush()
 
 	fmt.Println(strings.Repeat("-", 80))
 }
