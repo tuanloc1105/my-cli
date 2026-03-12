@@ -1,11 +1,17 @@
-ifeq ($(OS),Windows_NT)
+UNAME_S := $(shell uname -s)
+DEV_KIT_LOCATION ?= D:/dev-kit
+
+ifneq (,$(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S)))
     GOOS       = windows
     GOARCH     = amd64
     EXT        = .exe
     INSTALL_DIR = $(DEV_KIT_LOCATION)/tool
-    INSTALL     = move /Y
+    INSTALL     = mv -f
     CASE_NAME   = case-converter
-    CLEAN_CMD   = del /Q
+    CLEAN_CMD   = rm -f
+    export TEMP := $(shell cygpath -w /tmp)
+    export GOPATH := $(HOME)/go
+    export GOCACHE := $(HOME)/go/cache
 else
     GOOS       = linux
     GOARCH     =
