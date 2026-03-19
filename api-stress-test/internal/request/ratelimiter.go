@@ -2,12 +2,14 @@ package request
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
 // RateLimiter provides a simple token-bucket rate limiter using time.Ticker.
 type RateLimiter struct {
-	ticker *time.Ticker
+	ticker    *time.Ticker
+	firstDone atomic.Bool
 }
 
 // NewRateLimiter creates a rate limiter that allows rps requests per second.
@@ -22,9 +24,13 @@ func NewRateLimiter(rps float64) *RateLimiter {
 
 // Wait blocks until the next request is allowed or context is cancelled.
 // Returns true if allowed, false if context was cancelled.
-// No-op (returns true) if rate limiting is disabled.
+// The first request is allowed immediately without waiting for the ticker.
 func (r *RateLimiter) Wait(ctx context.Context) bool {
 	if r.ticker == nil {
+		return ctx.Err() == nil
+	}
+	// Allow the first request to proceed immediately
+	if r.firstDone.CompareAndSwap(false, true) {
 		return ctx.Err() == nil
 	}
 	select {

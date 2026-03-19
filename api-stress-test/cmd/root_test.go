@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,10 +69,23 @@ func TestValidateMethod(t *testing.T) {
 	}
 }
 
-// runTest is a helper that calls RunStressTest with default options for the new flags.
+// runTest is a helper that calls RunStressTest with common defaults.
 func runTest(t *testing.T, buf *bytes.Buffer, url, method string, requests, concurrency int, timeout time.Duration, headers map[string]string, body []byte, contentType string, rate float64, duration time.Duration, output string) error {
 	t.Helper()
-	return RunStressTest(buf, url, method, requests, concurrency, timeout, headers, body, contentType, rate, duration, output, false, false, false, 0, "", 0)
+	return RunStressTest(StressTestOptions{
+		Writer:        buf,
+		TargetURL:     url,
+		Method:        method,
+		TotalRequests: requests,
+		Concurrency:   concurrency,
+		Timeout:       timeout,
+		Headers:       headers,
+		Body:          body,
+		ContentType:   contentType,
+		Rate:          rate,
+		Duration:      duration,
+		OutputFormat:  output,
+	})
 }
 
 func TestRunStressTest_BasicSuccess(t *testing.T) {
@@ -176,8 +192,9 @@ func TestRunStressTest_RateLimiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if elapsed < 400*time.Millisecond {
-		t.Errorf("rate limiting too fast: %v (expected >= 400ms)", elapsed)
+	// First request is immediate, then 4 waits at 100ms each ≈ 400ms
+	if elapsed < 300*time.Millisecond {
+		t.Errorf("rate limiting too fast: %v (expected >= 300ms)", elapsed)
 	}
 }
 
@@ -210,8 +227,16 @@ func TestRunStressTest_ExpectStatus(t *testing.T) {
 	defer server.Close()
 
 	var buf bytes.Buffer
-	// Expect 200 but server returns 201 → all should fail
-	err := RunStressTest(&buf, server.URL, "GET", 5, 1, 5*time.Second, nil, nil, "", 0, 0, "json", false, false, false, 200, "", 0)
+	err := RunStressTest(StressTestOptions{
+		Writer:        &buf,
+		TargetURL:     server.URL,
+		Method:        "GET",
+		TotalRequests: 5,
+		Concurrency:   1,
+		Timeout:       5 * time.Second,
+		OutputFormat:  "json",
+		ExpectStatus:  200,
+	})
 
 	if err == nil {
 		t.Fatal("expected error when expect-status doesn't match")
@@ -226,10 +251,179 @@ func TestRunStressTest_ExpectBody(t *testing.T) {
 	defer server.Close()
 
 	var buf bytes.Buffer
-	// Expect body containing "missing" but server returns "hello" → should fail
-	err := RunStressTest(&buf, server.URL, "GET", 5, 1, 5*time.Second, nil, nil, "", 0, 0, "json", false, false, false, 0, "missing", 0)
+	err := RunStressTest(StressTestOptions{
+		Writer:        &buf,
+		TargetURL:     server.URL,
+		Method:        "GET",
+		TotalRequests: 5,
+		Concurrency:   1,
+		Timeout:       5 * time.Second,
+		OutputFormat:  "json",
+		ExpectBody:    "missing",
+	})
 
 	if err == nil {
 		t.Fatal("expected error when expect-body doesn't match")
+	}
+}
+
+func TestRunStressTest_WithHeaders(t *testing.T) {
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	headers := map[string]string{"Authorization": "Bearer test-token"}
+	err := RunStressTest(StressTestOptions{
+		Writer:        &buf,
+		TargetURL:     server.URL,
+		Method:        "GET",
+		TotalRequests: 1,
+		Concurrency:   1,
+		Timeout:       5 * time.Second,
+		Headers:       headers,
+		OutputFormat:  "json",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if receivedAuth != "Bearer test-token" {
+		t.Errorf("Authorization header = %q, want %q", receivedAuth, "Bearer test-token")
+	}
+}
+
+func TestRunStressTest_Warmup(t *testing.T) {
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	err := RunStressTest(StressTestOptions{
+		Writer:        &buf,
+		TargetURL:     server.URL,
+		Method:        "GET",
+		TotalRequests: 5,
+		Concurrency:   1,
+		Timeout:       5 * time.Second,
+		OutputFormat:  "json",
+		Warmup:        500 * time.Millisecond,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var output ui.JSONOutput
+	if err := json.Unmarshal(buf.Bytes(), &output); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	// Stats should only count 5 test requests, not warmup requests
+	if output.Statistics.Total != 5 {
+		t.Errorf("total = %d, want 5 (warmup should not be counted)", output.Statistics.Total)
+	}
+	// Total HTTP requests should be more than 5 (warmup + test)
+	if requestCount.Load() <= 5 {
+		t.Errorf("requestCount = %d, expected > 5 (should include warmup)", requestCount.Load())
+	}
+}
+
+func TestRunStressTest_DisableKeepalive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	err := RunStressTest(StressTestOptions{
+		Writer:           &buf,
+		TargetURL:        server.URL,
+		Method:           "GET",
+		TotalRequests:    5,
+		Concurrency:      1,
+		Timeout:          5 * time.Second,
+		OutputFormat:     "json",
+		DisableKeepalive: true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunStressTest_DisableRedirects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+
+	var buf bytes.Buffer
+	err := RunStressTest(StressTestOptions{
+		Writer:           &buf,
+		TargetURL:        server.URL,
+		Method:           "GET",
+		TotalRequests:    5,
+		Concurrency:      1,
+		Timeout:          5 * time.Second,
+		OutputFormat:     "json",
+		DisableRedirects: true,
+	})
+
+	// All should fail since 302 is not 2xx
+	if err == nil {
+		t.Fatal("expected error for redirect responses without following")
+	}
+
+	var output ui.JSONOutput
+	if jsonErr := json.Unmarshal(buf.Bytes(), &output); jsonErr != nil {
+		t.Fatalf("invalid JSON: %v", jsonErr)
+	}
+	if output.Statistics.StatusCount[302] != 5 {
+		t.Errorf("expected 5 302 responses, got %v", output.Statistics.StatusCount)
+	}
+}
+
+func TestRunStressTest_OutputFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "result.json")
+
+	var buf bytes.Buffer
+	err := RunStressTest(StressTestOptions{
+		Writer:        &buf,
+		TargetURL:     server.URL,
+		Method:        "GET",
+		TotalRequests: 5,
+		Concurrency:   1,
+		Timeout:       5 * time.Second,
+		OutputFormat:  "text",
+		OutputFile:    outFile,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+
+	var output ui.JSONOutput
+	if err := json.Unmarshal(data, &output); err != nil {
+		t.Fatalf("invalid JSON in output file: %v", err)
+	}
+	if output.Statistics.Total != 5 {
+		t.Errorf("total = %d, want 5", output.Statistics.Total)
 	}
 }

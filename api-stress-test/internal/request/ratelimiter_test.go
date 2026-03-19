@@ -56,9 +56,9 @@ func TestRateLimiterThrottles(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// 5 ticks at 100ms each = ~500ms (first tick may fire immediately)
-	if elapsed < 400*time.Millisecond {
-		t.Errorf("rate limiter elapsed %v, expected at least ~400ms for 5 requests at 10 req/s", elapsed)
+	// First request is immediate, then 4 ticks at 100ms each ≈ 400ms
+	if elapsed < 350*time.Millisecond {
+		t.Errorf("rate limiter elapsed %v, expected at least ~350ms for 5 requests at 10 req/s", elapsed)
 	}
 }
 
@@ -97,5 +97,23 @@ func TestRateLimiterUnlimitedContextCancelled(t *testing.T) {
 
 	if limiter.Wait(ctx) {
 		t.Error("Wait should return false when context is already cancelled")
+	}
+}
+
+func TestRateLimiterFirstRequestImmediate(t *testing.T) {
+	// Very slow rate: 1 req per 10 seconds
+	limiter := NewRateLimiter(0.1)
+	defer limiter.Stop()
+	ctx := context.Background()
+
+	start := time.Now()
+	if !limiter.Wait(ctx) {
+		t.Fatal("first Wait should return true")
+	}
+	elapsed := time.Since(start)
+
+	// First request should be near-instant, not wait 10 seconds
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("first request took %v, expected near-instant", elapsed)
 	}
 }

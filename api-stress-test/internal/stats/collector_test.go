@@ -8,10 +8,10 @@ import (
 func TestCollectorRecord(t *testing.T) {
 	c := NewCollector(10)
 
-	c.Record(200, 0.1, true, "")
-	c.Record(200, 0.2, true, "")
-	c.Record(500, 0.3, false, "server error")
-	c.Record(0, 0.05, false, "connection refused")
+	c.Record(200, 0.1, true, "", 100)
+	c.Record(200, 0.2, true, "", 200)
+	c.Record(500, 0.3, false, "server error", 0)
+	c.Record(0, 0.05, false, "connection refused", 0)
 
 	stat := c.GetStatistics()
 
@@ -38,9 +38,9 @@ func TestCollectorRecord(t *testing.T) {
 func TestCollectorMinMaxLatency(t *testing.T) {
 	c := NewCollector(5)
 
-	c.Record(200, 0.5, true, "")
-	c.Record(200, 0.1, true, "")
-	c.Record(200, 0.9, true, "")
+	c.Record(200, 0.5, true, "", 0)
+	c.Record(200, 0.1, true, "", 0)
+	c.Record(200, 0.9, true, "", 0)
 
 	stat := c.GetStatistics()
 
@@ -55,9 +55,9 @@ func TestCollectorMinMaxLatency(t *testing.T) {
 func TestCollectorAvgLatency(t *testing.T) {
 	c := NewCollector(3)
 
-	c.Record(200, 0.1, true, "")
-	c.Record(200, 0.2, true, "")
-	c.Record(200, 0.3, true, "")
+	c.Record(200, 0.1, true, "", 0)
+	c.Record(200, 0.2, true, "", 0)
+	c.Record(200, 0.3, true, "", 0)
 
 	stat := c.GetStatistics()
 
@@ -71,12 +71,12 @@ func TestCollectorErrorTracking(t *testing.T) {
 	c := NewCollector(10)
 
 	for i := 0; i < 5; i++ {
-		c.Record(0, 0.1, false, "connection refused")
+		c.Record(0, 0.1, false, "connection refused", 0)
 	}
 	for i := 0; i < 3; i++ {
-		c.Record(0, 0.1, false, "timeout")
+		c.Record(0, 0.1, false, "timeout", 0)
 	}
-	c.Record(0, 0.1, false, "dns error")
+	c.Record(0, 0.1, false, "dns error", 0)
 
 	stat := c.GetStatistics()
 
@@ -96,7 +96,7 @@ func TestCollectorTopErrorsMaxFive(t *testing.T) {
 
 	errors := []string{"err1", "err2", "err3", "err4", "err5", "err6", "err7"}
 	for _, e := range errors {
-		c.Record(0, 0.1, false, e)
+		c.Record(0, 0.1, false, e, 0)
 	}
 
 	stat := c.GetStatistics()
@@ -117,7 +117,7 @@ func TestCollectorConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < recordsPerGoroutine; j++ {
-				c.Record(200, 0.1, true, "")
+				c.Record(200, 0.1, true, "", 0)
 			}
 		}()
 	}
@@ -167,5 +167,104 @@ func TestPercentile(t *testing.T) {
 				t.Errorf("percentile(%v, %f) = %f, want %f", tt.data, tt.p, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestCollectorP95(t *testing.T) {
+	c := NewCollector(100)
+	for i := 1; i <= 100; i++ {
+		c.Record(200, float64(i)*0.01, true, "", 0)
+	}
+
+	stat := c.GetStatistics()
+	if stat.P95Latency < 0.94 || stat.P95Latency > 0.96 {
+		t.Errorf("p95 = %f, want ~0.95", stat.P95Latency)
+	}
+}
+
+func TestCollectorSuccessRate(t *testing.T) {
+	c := NewCollector(10)
+	for i := 0; i < 7; i++ {
+		c.Record(200, 0.1, true, "", 0)
+	}
+	for i := 0; i < 3; i++ {
+		c.Record(500, 0.1, false, "error", 0)
+	}
+
+	stat := c.GetStatistics()
+	if stat.SuccessRate != 70.0 {
+		t.Errorf("success rate = %f, want 70.0", stat.SuccessRate)
+	}
+}
+
+func TestCollectorResponseSize(t *testing.T) {
+	c := NewCollector(10)
+	c.Record(200, 0.1, true, "", 1000)
+	c.Record(200, 0.1, true, "", 2000)
+	c.Record(200, 0.1, true, "", 3000)
+
+	stat := c.GetStatistics()
+	if stat.TotalResponseBytes != 6000 {
+		t.Errorf("total bytes = %d, want 6000", stat.TotalResponseBytes)
+	}
+	if stat.AvgResponseBytes != 2000 {
+		t.Errorf("avg bytes = %d, want 2000", stat.AvgResponseBytes)
+	}
+}
+
+func TestCollectorReservoirSampling(t *testing.T) {
+	c := NewCollector(100)
+	for i := 0; i < 15000; i++ {
+		c.Record(200, float64(i)*0.0001, true, "", 0)
+	}
+
+	stat := c.GetStatistics()
+	if stat.Total != 15000 {
+		t.Errorf("total = %d, want 15000", stat.Total)
+	}
+	if len(stat.Histogram) == 0 {
+		t.Error("expected histogram even with reservoir sampling")
+	}
+}
+
+func TestCollectorHistogramSingleValue(t *testing.T) {
+	c := NewCollector(10)
+	for i := 0; i < 10; i++ {
+		c.Record(200, 0.5, true, "", 0)
+	}
+
+	stat := c.GetStatistics()
+	if len(stat.Histogram) != 1 {
+		t.Errorf("expected 1 histogram bucket for identical values, got %d", len(stat.Histogram))
+	}
+	if stat.Histogram[0].Count != 10 {
+		t.Errorf("bucket count = %d, want 10", stat.Histogram[0].Count)
+	}
+}
+
+func TestCollectorThroughputTimeline(t *testing.T) {
+	c := NewCollector(10)
+	for i := 0; i < 5; i++ {
+		c.Record(200, 0.1, true, "", 0)
+	}
+
+	stat := c.GetStatistics()
+	if len(stat.Throughput) == 0 {
+		t.Error("expected throughput data")
+	}
+	totalReqs := 0
+	for _, entry := range stat.Throughput {
+		totalReqs += entry.Requests
+	}
+	if totalReqs != 5 {
+		t.Errorf("throughput total = %d, want 5", totalReqs)
+	}
+}
+
+func BenchmarkCollectorRecord(b *testing.B) {
+	c := NewCollector(b.N)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.Record(200, 0.1, true, "", 100)
 	}
 }

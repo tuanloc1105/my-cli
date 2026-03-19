@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -15,6 +16,7 @@ type Progress struct {
 	completed      atomic.Int64
 	startTime      time.Time
 	done           chan struct{}
+	wg             sync.WaitGroup
 	isDurationMode bool
 	duration       time.Duration
 }
@@ -39,7 +41,9 @@ func (p *Progress) Add(n int64) {
 
 // Start begins the progress display goroutine. Call Stop() when done.
 func (p *Progress) Start() {
+	p.wg.Add(1)
 	go func() {
+		defer p.wg.Done()
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -72,9 +76,10 @@ func (p *Progress) Start() {
 	}()
 }
 
-// Stop ends the progress display.
+// Stop ends the progress display and waits for the goroutine to exit.
 func (p *Progress) Stop() {
 	close(p.done)
+	p.wg.Wait()
 }
 
 func (p *Progress) render(completed int64, elapsed time.Duration, rps float64) {

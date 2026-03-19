@@ -22,29 +22,35 @@ const (
 	colorCyan   = "\033[36m"
 )
 
-// colorEnabled returns true if the writer supports ANSI colors (i.e., is a terminal).
-func colorEnabled(w io.Writer) bool {
+// colorWriter wraps an io.Writer with a cached color-enabled flag,
+// avoiding repeated Stat() syscalls per color operation.
+type colorWriter struct {
+	w       io.Writer
+	enabled bool
+}
+
+// newColorWriter creates a colorWriter, checking once whether the writer is a terminal.
+func newColorWriter(w io.Writer) *colorWriter {
 	f, ok := w.(*os.File)
 	if !ok {
-		return false
+		return &colorWriter{w: w, enabled: false}
 	}
 	stat, err := f.Stat()
 	if err != nil {
-		return false
+		return &colorWriter{w: w, enabled: false}
 	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
+	return &colorWriter{w: w, enabled: (stat.Mode() & os.ModeCharDevice) != 0}
 }
 
-func colorize(w io.Writer, color, text string) string {
-	if !colorEnabled(w) {
+func (cw *colorWriter) colorize(color, text string) string {
+	if !cw.enabled {
 		return text
 	}
 	return color + text + colorReset
 }
 
-// statusColor returns the appropriate color for an HTTP status code.
-func statusColor(w io.Writer, status int) string {
-	if !colorEnabled(w) {
+func (cw *colorWriter) statusColor(status int) string {
+	if !cw.enabled {
 		return ""
 	}
 	switch {
@@ -57,6 +63,20 @@ func statusColor(w io.Writer, status int) string {
 	default:
 		return colorRed
 	}
+}
+
+// HeaderConfig holds the parameters for printing the test configuration header.
+type HeaderConfig struct {
+	URL            string
+	Method         string
+	TotalRequests  int
+	Concurrency    int
+	TimeoutSec     float64
+	Rate           float64
+	IsDurationMode bool
+	Duration       string
+	BodyLen        int
+	ContentType    string
 }
 
 // TestConfig holds the test configuration for JSON output.
@@ -79,23 +99,24 @@ type JSONOutput struct {
 }
 
 // PrintHeader prints the test configuration before the test starts.
-func PrintHeader(w io.Writer, url, method string, totalRequests, concurrency int, timeoutSec, rate float64, isDurationMode bool, duration string, bodyLen int, contentType string) {
-	fmt.Fprintf(w, "%s : %s\n", colorize(w, colorBold, "Target URL           "), url)
-	fmt.Fprintf(w, "%s : %s\n", colorize(w, colorBold, "HTTP method          "), method)
-	if isDurationMode {
-		fmt.Fprintf(w, "%s : %s\n", colorize(w, colorBold, "Duration             "), duration)
+func PrintHeader(w io.Writer, cfg HeaderConfig) {
+	cw := newColorWriter(w)
+	fmt.Fprintf(w, "%s : %s\n", cw.colorize(colorBold, "Target URL           "), cfg.URL)
+	fmt.Fprintf(w, "%s : %s\n", cw.colorize(colorBold, "HTTP method          "), cfg.Method)
+	if cfg.IsDurationMode {
+		fmt.Fprintf(w, "%s : %s\n", cw.colorize(colorBold, "Duration             "), cfg.Duration)
 	} else {
-		fmt.Fprintf(w, "%s : %d\n", colorize(w, colorBold, "Total requests       "), totalRequests)
+		fmt.Fprintf(w, "%s : %d\n", cw.colorize(colorBold, "Total requests       "), cfg.TotalRequests)
 	}
-	fmt.Fprintf(w, "%s : %d\n", colorize(w, colorBold, "Concurrency (workers)"), concurrency)
-	fmt.Fprintf(w, "%s : %.1f seconds\n", colorize(w, colorBold, "Timeout per request  "), timeoutSec)
-	if rate > 0 {
-		fmt.Fprintf(w, "%s : %.0f req/s\n", colorize(w, colorBold, "Rate limit           "), rate)
+	fmt.Fprintf(w, "%s : %d\n", cw.colorize(colorBold, "Concurrency (workers)"), cfg.Concurrency)
+	fmt.Fprintf(w, "%s : %.1f seconds\n", cw.colorize(colorBold, "Timeout per request  "), cfg.TimeoutSec)
+	if cfg.Rate > 0 {
+		fmt.Fprintf(w, "%s : %.0f req/s\n", cw.colorize(colorBold, "Rate limit           "), cfg.Rate)
 	}
-	if bodyLen > 0 {
-		fmt.Fprintf(w, "%s : %d bytes\n", colorize(w, colorBold, "Body size            "), bodyLen)
-		if contentType != "" {
-			fmt.Fprintf(w, "%s : %s\n", colorize(w, colorBold, "Content-Type         "), contentType)
+	if cfg.BodyLen > 0 {
+		fmt.Fprintf(w, "%s : %d bytes\n", cw.colorize(colorBold, "Body size            "), cfg.BodyLen)
+		if cfg.ContentType != "" {
+			fmt.Fprintf(w, "%s : %s\n", cw.colorize(colorBold, "Content-Type         "), cfg.ContentType)
 		}
 	}
 	fmt.Fprintln(w, strings.Repeat("-", 60))
@@ -103,18 +124,27 @@ func PrintHeader(w io.Writer, url, method string, totalRequests, concurrency int
 
 // PrintTextResult prints the test results in human-readable text format with colors.
 func PrintTextResult(w io.Writer, stat stats.Statistics, totalTime, reqPerSec float64) {
+	cw := newColorWriter(w)
+
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, colorize(w, colorBold, strings.Repeat("=", 60)))
-	fmt.Fprintln(w, colorize(w, colorBold, "Stress test finished"))
-	fmt.Fprintln(w, colorize(w, colorBold, strings.Repeat("=", 60)))
+	fmt.Fprintln(w, cw.colorize(colorBold, strings.Repeat("=", 60)))
+	fmt.Fprintln(w, cw.colorize(colorBold, "Stress test finished"))
+	fmt.Fprintln(w, cw.colorize(colorBold, strings.Repeat("=", 60)))
 	fmt.Fprintf(w, "Total time            : %.4f seconds\n", totalTime)
 	fmt.Fprintf(w, "Requests per second   : %.2f req/s\n", reqPerSec)
-	fmt.Fprintf(w, "Successes             : %s\n", colorize(w, colorGreen, fmt.Sprintf("%d", stat.Successes)))
+	fmt.Fprintf(w, "Successes             : %s\n", cw.colorize(colorGreen, fmt.Sprintf("%d", stat.Successes)))
 	if stat.Failures > 0 {
-		fmt.Fprintf(w, "Failures              : %s\n", colorize(w, colorRed, fmt.Sprintf("%d", stat.Failures)))
+		fmt.Fprintf(w, "Failures              : %s\n", cw.colorize(colorRed, fmt.Sprintf("%d", stat.Failures)))
 	} else {
 		fmt.Fprintf(w, "Failures              : %d\n", stat.Failures)
 	}
+	fmt.Fprintf(w, "Success rate          : %.1f%%\n", stat.SuccessRate)
+
+	if stat.TotalResponseBytes > 0 {
+		fmt.Fprintf(w, "Data transferred      : %s\n", formatBytes(stat.TotalResponseBytes))
+		fmt.Fprintf(w, "Avg response size     : %s\n", formatBytes(stat.AvgResponseBytes))
+	}
+
 	fmt.Fprintln(w, "Status codes          :")
 
 	var statusKeys []int
@@ -129,7 +159,7 @@ func PrintTextResult(w io.Writer, stat stats.Statistics, totalTime, reqPerSec fl
 		if status != 0 {
 			label = fmt.Sprintf("%d", status)
 		}
-		sc := statusColor(w, status)
+		sc := cw.statusColor(status)
 		if sc != "" {
 			fmt.Fprintf(w, "  %s%-15s%s %d\n", sc, label, colorReset, count)
 		} else {
@@ -138,32 +168,36 @@ func PrintTextResult(w io.Writer, stat stats.Statistics, totalTime, reqPerSec fl
 	}
 
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, colorize(w, colorBold, "Latency (seconds)"))
+	fmt.Fprintln(w, cw.colorize(colorBold, "Latency (seconds)"))
 	fmt.Fprintf(w, "  Min                 : %.4f\n", stat.MinLatency)
 	fmt.Fprintf(w, "  Max                 : %.4f\n", stat.MaxLatency)
 	fmt.Fprintf(w, "  Average             : %.4f\n", stat.AvgLatency)
 	fmt.Fprintf(w, "  p50                 : %.4f\n", stat.P50Latency)
 	fmt.Fprintf(w, "  p90                 : %.4f\n", stat.P90Latency)
+	fmt.Fprintf(w, "  p95                 : %.4f\n", stat.P95Latency)
 	fmt.Fprintf(w, "  p99                 : %.4f\n", stat.P99Latency)
 
 	// Histogram
 	if len(stat.Histogram) > 0 {
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, colorize(w, colorBold, "Latency distribution"))
-		printHistogram(w, stat.Histogram)
+		fmt.Fprintln(w, cw.colorize(colorBold, "Latency distribution"))
+		printHistogram(cw, stat.Histogram)
 	}
+
+	// Throughput timeline for tests longer than 2 seconds
+	printThroughputTimeline(cw, stat.Throughput)
 
 	if len(stat.TopErrors) > 0 {
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, colorize(w, colorBold, "Top Errors            :"))
+		fmt.Fprintln(w, cw.colorize(colorBold, "Top Errors            :"))
 		for _, e := range stat.TopErrors {
-			fmt.Fprintf(w, "  %s x %d\n", colorize(w, colorRed, e.Message), e.Count)
+			fmt.Fprintf(w, "  %s x %d\n", cw.colorize(colorRed, e.Message), e.Count)
 		}
 	}
 }
 
 // printHistogram renders an ASCII histogram.
-func printHistogram(w io.Writer, buckets []stats.HistogramBucket) {
+func printHistogram(cw *colorWriter, buckets []stats.HistogramBucket) {
 	maxCount := 0
 	for _, b := range buckets {
 		if b.Count > maxCount {
@@ -184,22 +218,54 @@ func printHistogram(w io.Writer, buckets []stats.HistogramBucket) {
 		barLen := b.Count * barWidth / maxCount
 		bar := strings.Repeat("█", barLen)
 		pct := float64(b.Count) / float64(total) * 100
-		fmt.Fprintf(w, "  [%.3f-%.3fs] %s%-*s%s %d (%.1f%%)\n",
+		fmt.Fprintf(cw.w, "  [%.3f-%.3fs] %s %d (%.1f%%)\n",
 			b.MinSec, b.MaxSec,
-			func() string {
-				if colorEnabled(w) {
-					return colorCyan
-				}
-				return ""
-			}(),
-			barWidth, bar,
-			func() string {
-				if colorEnabled(w) {
-					return colorReset
-				}
-				return ""
-			}(),
+			cw.colorize(colorCyan, fmt.Sprintf("%-*s", barWidth, bar)),
 			b.Count, pct)
+	}
+}
+
+// printThroughputTimeline renders a per-second throughput bar chart for tests > 2 seconds.
+func printThroughputTimeline(cw *colorWriter, throughput []stats.ThroughputEntry) {
+	if len(throughput) < 3 {
+		return
+	}
+
+	fmt.Fprintln(cw.w)
+	fmt.Fprintln(cw.w, cw.colorize(colorBold, "Throughput timeline (req/s)"))
+
+	maxReqs := 0
+	for _, t := range throughput {
+		if t.Requests > maxReqs {
+			maxReqs = t.Requests
+		}
+	}
+	if maxReqs == 0 {
+		return
+	}
+
+	const barWidth = 30
+	for _, t := range throughput {
+		barLen := t.Requests * barWidth / maxReqs
+		bar := strings.Repeat("█", barLen)
+		fmt.Fprintf(cw.w, "  [%3ds] %s %d\n",
+			t.Second,
+			cw.colorize(colorCyan, fmt.Sprintf("%-*s", barWidth, bar)),
+			t.Requests)
+	}
+}
+
+// formatBytes formats a byte count into a human-readable string.
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
 	}
 }
 

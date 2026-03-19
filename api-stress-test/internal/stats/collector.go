@@ -9,25 +9,32 @@ import (
 	"time"
 )
 
-const reservoirSize = 10000 // Max latency samples for percentile calculation
+// reservoirSize controls the maximum number of latency samples retained for
+// percentile calculation. Reservoir sampling guarantees that every request has
+// an equal probability of being represented, so percentile estimates remain
+// statistically accurate. The trade-off is memory vs accuracy: 10,000 float64
+// values ≈ 80 KB, which provides sub-1% relative error on p99 for typical
+// workloads while keeping memory bounded regardless of total request count.
+const reservoirSize = 10000
 
 // Collector collects and calculates statistics for stress test results.
 // It is thread-safe and designed to handle concurrent result recording.
 // Uses reservoir sampling to bound memory for latency percentiles.
 type Collector struct {
-	mu            sync.Mutex
-	successes     int64
-	failures      int64
-	totalCount    int64           // Total requests recorded
-	reservoir     []float64       // Reservoir-sampled latencies (max reservoirSize)
-	latencySum    float64         // Running sum for average calculation
-	statusCount   map[int]int     // Distribution of HTTP status codes
-	errorMessages map[string]int  // Error message frequency
-	minLatency    float64
-	maxLatency    float64
-	firstLatency  bool
-	startTime     int64           // Unix timestamp when first record was added
-	throughput    map[int]int     // Per-second request counts (second offset -> count)
+	mu                sync.Mutex
+	successes         int64
+	failures          int64
+	totalCount        int64           // Total requests recorded
+	reservoir         []float64       // Reservoir-sampled latencies (max reservoirSize)
+	latencySum        float64         // Running sum for average calculation
+	statusCount       map[int]int     // Distribution of HTTP status codes
+	errorMessages     map[string]int  // Error message frequency
+	minLatency        float64
+	maxLatency        float64
+	firstLatency      bool
+	startTime         int64           // Unix timestamp when first record was added
+	throughput        map[int]int     // Per-second request counts (second offset -> count)
+	totalResponseSize int64           // Total response body bytes received
 }
 
 // NewCollector creates a new statistics collector.
@@ -46,23 +53,27 @@ func NewCollector(initialCapacity int) *Collector {
 }
 
 // Record adds a request result to the collector in a thread-safe manner.
-func (c *Collector) Record(statusCode int, elapsed float64, ok bool, errorMsg string) {
+func (c *Collector) Record(statusCode int, elapsed float64, ok bool, errorMsg string, responseSize int64) {
+	now := time.Now().Unix() // Computed before lock to reduce mutex contention
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.totalCount++
 	c.latencySum += elapsed
+	c.totalResponseSize += responseSize
 	c.statusCount[statusCode]++
 
 	// Track throughput per second
-	now := time.Now().Unix()
 	if c.startTime == 0 {
 		c.startTime = now
 	}
 	sec := int(now - c.startTime)
 	c.throughput[sec]++
 
-	// Reservoir sampling: keep exactly reservoirSize samples with uniform probability
+	// Reservoir sampling: keep exactly reservoirSize samples with uniform probability.
+	// When total requests exceed reservoirSize, each new sample replaces an existing
+	// one with probability reservoirSize/totalCount, ensuring unbiased representation.
+	// Histogram and percentile data are approximate when total > reservoirSize.
 	if int(c.totalCount) <= reservoirSize {
 		c.reservoir = append(c.reservoir, elapsed)
 	} else {
@@ -117,19 +128,25 @@ type ThroughputEntry struct {
 
 // Statistics holds the calculated final statistics from a stress test run.
 type Statistics struct {
-	Successes   int64              `json:"successes"`
-	Failures    int64              `json:"failures"`
-	Total       int64              `json:"total"`
-	StatusCount map[int]int        `json:"status_count"`
-	MinLatency  float64            `json:"min_latency"`
-	MaxLatency  float64            `json:"max_latency"`
-	AvgLatency  float64            `json:"avg_latency"`
-	P50Latency  float64            `json:"p50_latency"`
-	P90Latency  float64            `json:"p90_latency"`
-	P99Latency  float64            `json:"p99_latency"`
-	TopErrors   []ErrorEntry       `json:"top_errors,omitempty"`
-	Histogram   []HistogramBucket  `json:"histogram,omitempty"`
-	Throughput  []ThroughputEntry  `json:"throughput,omitempty"`
+	Successes          int64             `json:"successes"`
+	Failures           int64             `json:"failures"`
+	Total              int64             `json:"total"`
+	SuccessRate        float64           `json:"success_rate"`
+	StatusCount        map[int]int       `json:"status_count"`
+	MinLatency         float64           `json:"min_latency"`
+	MaxLatency         float64           `json:"max_latency"`
+	AvgLatency         float64           `json:"avg_latency"`
+	P50Latency         float64           `json:"p50_latency"`
+	P90Latency         float64           `json:"p90_latency"`
+	P95Latency         float64           `json:"p95_latency"`
+	P99Latency         float64           `json:"p99_latency"`
+	TopErrors          []ErrorEntry      `json:"top_errors,omitempty"`
+	// Histogram buckets use reservoir-sampled data and are approximate
+	// when total requests exceed 10,000.
+	Histogram          []HistogramBucket `json:"histogram,omitempty"`
+	Throughput         []ThroughputEntry `json:"throughput,omitempty"`
+	AvgResponseBytes   int64             `json:"avg_response_bytes"`
+	TotalResponseBytes int64             `json:"total_response_bytes"`
 }
 
 // GetStatistics calculates and returns final statistics from all collected results.
@@ -153,6 +170,7 @@ func (c *Collector) GetStatistics() Statistics {
 
 	p50 := percentile(sorted, 0.50)
 	p90 := percentile(sorted, 0.90)
+	p95 := percentile(sorted, 0.95)
 	p99 := percentile(sorted, 0.99)
 
 	statusCountCopy := make(map[int]int)
@@ -190,20 +208,31 @@ func (c *Collector) GetStatistics() Statistics {
 		}
 	}
 
+	successRate := float64(c.successes) / float64(c.totalCount) * 100
+
+	var avgResponseBytes int64
+	if c.totalCount > 0 {
+		avgResponseBytes = c.totalResponseSize / c.totalCount
+	}
+
 	return Statistics{
-		Successes:   c.successes,
-		Failures:    c.failures,
-		Total:       c.totalCount,
-		StatusCount: statusCountCopy,
-		MinLatency:  c.minLatency,
-		MaxLatency:  c.maxLatency,
-		AvgLatency:  avgLatency,
-		P50Latency:  p50,
-		P90Latency:  p90,
-		P99Latency:  p99,
-		TopErrors:   topErrors,
-		Histogram:   histogram,
-		Throughput:  throughput,
+		Successes:          c.successes,
+		Failures:           c.failures,
+		Total:              c.totalCount,
+		SuccessRate:        successRate,
+		StatusCount:        statusCountCopy,
+		MinLatency:         c.minLatency,
+		MaxLatency:         c.maxLatency,
+		AvgLatency:         avgLatency,
+		P50Latency:         p50,
+		P90Latency:         p90,
+		P95Latency:         p95,
+		P99Latency:         p99,
+		TopErrors:          topErrors,
+		Histogram:          histogram,
+		Throughput:         throughput,
+		AvgResponseBytes:   avgResponseBytes,
+		TotalResponseBytes: c.totalResponseSize,
 	}
 }
 

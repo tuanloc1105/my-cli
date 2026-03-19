@@ -15,13 +15,18 @@ import (
 	"time"
 )
 
+// maxResponseDrain is the maximum number of bytes to read/drain from a response
+// body. Set to 4 MB to handle larger API responses while still bounding memory.
+const maxResponseDrain = 4 << 20
+
 // Result holds the result of a single HTTP request execution.
 // It contains the request outcome, status code, latency, and any error information.
 type Result struct {
-	OK         bool    // true if status code is 2xx
-	StatusCode int     // HTTP status code (0 if request failed)
-	Elapsed    float64 // Request duration in seconds
-	Error      string  // Error message if request failed
+	OK           bool    // true if status code is 2xx
+	StatusCode   int     // HTTP status code (0 if request failed)
+	Elapsed      float64 // Request duration in seconds
+	Error        string  // Error message if request failed
+	ResponseSize int64   // Response body size in bytes
 }
 
 // ParseHeaders parses HTTP headers from a semicolon-separated string format.
@@ -211,10 +216,12 @@ func ExecuteRequest(
 
 	// Read limited body for validation or drain for connection reuse
 	var respBody []byte
+	var responseSize int64
 	if expectBody != "" {
-		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxResponseDrain))
+		responseSize = int64(len(respBody))
 	} else {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		responseSize, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseDrain))
 	}
 
 	statusCode := resp.StatusCode
@@ -239,10 +246,11 @@ func ExecuteRequest(
 	}
 
 	return Result{
-		OK:         ok,
-		StatusCode: statusCode,
-		Elapsed:    elapsed,
-		Error:      errMsg,
+		OK:           ok,
+		StatusCode:   statusCode,
+		Elapsed:      elapsed,
+		Error:        errMsg,
+		ResponseSize: responseSize,
 	}
 }
 

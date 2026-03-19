@@ -5,6 +5,7 @@ package cmd
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,30 @@ import (
 var validMethods = map[string]bool{
 	"GET": true, "POST": true, "PUT": true, "DELETE": true,
 	"PATCH": true, "HEAD": true, "OPTIONS": true,
+}
+
+// StressTestOptions holds all configuration for running a stress test.
+type StressTestOptions struct {
+	Writer           io.Writer
+	TargetURL        string
+	Method           string
+	TotalRequests    int
+	Concurrency      int
+	Timeout          time.Duration
+	Headers          map[string]string
+	Body             []byte
+	ContentType      string
+	Rate             float64
+	Duration         time.Duration
+	OutputFormat     string
+	Insecure         bool
+	DisableKeepalive bool
+	DisableRedirects bool
+	ExpectStatus     int
+	ExpectBody       string
+	Warmup           time.Duration
+	OutputFile       string
+	Proxy            string
 }
 
 // Execute sets up the Cobra root command and runs the CLI.
@@ -53,6 +78,8 @@ func Execute() {
 		expectStatus     int
 		expectBody       string
 		warmup           string
+		outputFile       string
+		proxy            string
 	)
 
 	rootCmd := &cobra.Command{
@@ -65,7 +92,9 @@ func Execute() {
   api-stress-test --url http://example.com/api --duration 30s --concurrency 20
   api-stress-test --url http://example.com/api --requests 500 --rate 50
   api-stress-test --url http://example.com/api --requests 100 --output json
-  api-stress-test --url https://example.com/api --insecure --expect-status 200`,
+  api-stress-test --url https://example.com/api --insecure --expect-status 200
+  api-stress-test --url http://example.com/api --requests 50 --output-file result.json
+  api-stress-test --url http://example.com/api --requests 50 --proxy http://proxy:8080`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := ValidateURL(targetURL); err != nil {
@@ -123,26 +152,28 @@ func Execute() {
 				}
 			}
 
-			return RunStressTest(
-				os.Stdout,
-				targetURL,
-				strings.ToUpper(method),
-				requests,
-				concurrency,
-				time.Duration(timeout*float64(time.Second)),
-				parsedHeaders,
-				body,
-				contentType,
-				rate,
-				dur,
-				outputFormat,
-				insecure,
-				disableKeepalive,
-				disableRedirects,
-				expectStatus,
-				expectBody,
-				warmupDur,
-			)
+			return RunStressTest(StressTestOptions{
+				Writer:           os.Stdout,
+				TargetURL:        targetURL,
+				Method:           strings.ToUpper(method),
+				TotalRequests:    requests,
+				Concurrency:      concurrency,
+				Timeout:          time.Duration(timeout * float64(time.Second)),
+				Headers:          parsedHeaders,
+				Body:             body,
+				ContentType:      contentType,
+				Rate:             rate,
+				Duration:         dur,
+				OutputFormat:     outputFormat,
+				Insecure:         insecure,
+				DisableKeepalive: disableKeepalive,
+				DisableRedirects: disableRedirects,
+				ExpectStatus:     expectStatus,
+				ExpectBody:       expectBody,
+				Warmup:           warmupDur,
+				OutputFile:       outputFile,
+				Proxy:            proxy,
+			})
 		},
 	}
 
@@ -172,6 +203,9 @@ func Execute() {
 	rootCmd.Flags().BoolVar(&disableKeepalive, "disable-keepalive", false, "Disable HTTP keep-alive (new connection per request)")
 	rootCmd.Flags().BoolVar(&disableRedirects, "disable-redirects", false, "Do not follow HTTP redirects")
 
+	// Proxy
+	rootCmd.Flags().StringVar(&proxy, "proxy", "", "HTTP proxy URL (e.g., http://proxy:8080)")
+
 	// Response validation
 	rootCmd.Flags().IntVar(&expectStatus, "expect-status", 0, "Expected HTTP status code (others count as failure)")
 	rootCmd.Flags().StringVar(&expectBody, "expect-body", "", "Expected substring in response body")
@@ -181,6 +215,7 @@ func Execute() {
 
 	// Output
 	rootCmd.Flags().StringVar(&outputFormat, "output", "text", "Output format: text or json")
+	rootCmd.Flags().StringVar(&outputFile, "output-file", "", "Write JSON results to file (works with any output format)")
 
 	// Mutual exclusivity
 	rootCmd.MarkFlagsMutuallyExclusive("data", "json-body", "json-file", "body", "file")
@@ -192,86 +227,95 @@ func Execute() {
 }
 
 // RunStressTest runs the HTTP stress test and returns an error if there are failures.
-// Output is written to w; pass os.Stdout for normal CLI usage.
-func RunStressTest(
-	w io.Writer,
-	targetURL string,
-	method string,
-	totalRequests int,
-	concurrency int,
-	timeout time.Duration,
-	headers map[string]string,
-	body []byte,
-	contentType string,
-	rate float64,
-	duration time.Duration,
-	outputFormat string,
-	insecure bool,
-	disableKeepalive bool,
-	disableRedirects bool,
-	expectStatus int,
-	expectBody string,
-	warmup time.Duration,
-) error {
-	isJSON := outputFormat == "json"
-	isDurationMode := duration > 0
+// Output is written to opts.Writer; pass os.Stdout for normal CLI usage.
+func RunStressTest(opts StressTestOptions) error {
+	w := opts.Writer
+	isJSON := opts.OutputFormat == "json"
+	isDurationMode := opts.Duration > 0
 
 	if !isJSON {
 		durationStr := ""
 		if isDurationMode {
-			durationStr = duration.String()
+			durationStr = opts.Duration.String()
 		}
-		ui.PrintHeader(w, targetURL, method, totalRequests, concurrency, timeout.Seconds(), rate, isDurationMode, durationStr, len(body), contentType)
+		ui.PrintHeader(w, ui.HeaderConfig{
+			URL:            opts.TargetURL,
+			Method:         opts.Method,
+			TotalRequests:  opts.TotalRequests,
+			Concurrency:    opts.Concurrency,
+			TimeoutSec:     opts.Timeout.Seconds(),
+			Rate:           opts.Rate,
+			IsDurationMode: isDurationMode,
+			Duration:       durationStr,
+			BodyLen:        len(opts.Body),
+			ContentType:    opts.ContentType,
+		})
 	}
 
 	// Configure HTTP Transport
 	transport := &http.Transport{
-		MaxIdleConns:        concurrency,
-		MaxIdleConnsPerHost: concurrency,
+		MaxIdleConns:        opts.Concurrency,
+		MaxIdleConnsPerHost: opts.Concurrency,
 		IdleConnTimeout:     90 * time.Second,
-		DisableKeepAlives:   disableKeepalive,
+		DisableKeepAlives:   opts.DisableKeepalive,
 	}
-	if insecure {
+	if opts.Insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	}
+	if opts.Proxy != "" {
+		proxyURL, err := url.Parse(opts.Proxy)
+		if err != nil {
+			return fmt.Errorf("invalid proxy URL: %w", err)
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
+		Timeout:   opts.Timeout,
 	}
-	if disableRedirects {
+	if opts.DisableRedirects {
 		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
 	}
 
-	// Run warm-up phase (requests without recording stats)
-	if warmup > 0 {
-		if !isJSON {
-			fmt.Fprintf(w, "Warming up for %s...\n", warmup)
-		}
-		warmCtx, warmCancel := context.WithTimeout(context.Background(), warmup)
-		defer warmCancel() // Bug 3 fix: defer cancel immediately
+	// Setup signal handling once for the entire test lifecycle
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 
-		// Bug 4 fix: handle signals during warmup
-		warmSigChan := make(chan os.Signal, 1)
-		signal.Notify(warmSigChan, os.Interrupt, syscall.SIGTERM)
+	// Run warm-up phase (requests without recording stats)
+	if opts.Warmup > 0 {
+		if !isJSON {
+			fmt.Fprintf(w, "Warming up for %s...\n", opts.Warmup)
+		}
+		warmCtx, warmCancel := context.WithTimeout(context.Background(), opts.Warmup)
+		defer warmCancel()
+
+		// Signal listener for warmup phase
+		warmDone := make(chan struct{})
 		go func() {
+			defer close(warmDone)
 			select {
-			case <-warmSigChan:
+			case sig := <-sigChan:
 				warmCancel()
+				// Re-enqueue so the main phase goroutine can also receive it
+				select {
+				case sigChan <- sig:
+				default:
+				}
 			case <-warmCtx.Done():
 			}
 		}()
 
 		var warmWg sync.WaitGroup
-		for i := 0; i < concurrency; i++ {
+		for i := 0; i < opts.Concurrency; i++ {
 			warmWg.Add(1)
 			go func() {
 				defer warmWg.Done()
 				for warmCtx.Err() == nil {
-					res := request.ExecuteRequest(warmCtx, client, method, targetURL, headers, body, contentType, 0, "")
-					// Bug 5 fix: back off on failure to prevent CPU spin
+					res := request.ExecuteRequest(warmCtx, client, opts.Method, opts.TargetURL, opts.Headers, opts.Body, opts.ContentType, 0, "")
 					if !res.OK && res.Elapsed < 0.01 {
 						time.Sleep(10 * time.Millisecond)
 					}
@@ -279,7 +323,9 @@ func RunStressTest(
 			}()
 		}
 		warmWg.Wait()
-		signal.Stop(warmSigChan)
+		warmCancel()   // Ensure warmCtx is done
+		<-warmDone     // Wait for signal goroutine to exit before starting main phase
+
 		if !isJSON {
 			fmt.Fprintln(w, "Warm-up complete. Starting test...")
 			fmt.Fprintln(w, strings.Repeat("-", 60))
@@ -290,50 +336,50 @@ func RunStressTest(
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if isDurationMode {
-		ctx, cancel = context.WithTimeout(context.Background(), duration)
+		ctx, cancel = context.WithTimeout(context.Background(), opts.Duration)
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
 	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
 	go func() {
-		<-sigChan
-		if !isJSON {
-			fmt.Fprintln(w, "\nStopping requests... (waiting for active workers to finish)")
+		select {
+		case <-sigChan:
+			if !isJSON {
+				fmt.Fprintln(w, "\nStopping requests... (waiting for active workers to finish)")
+			}
+			cancel()
+		case <-ctx.Done():
 		}
-		cancel()
 	}()
 
 	startTime := time.Now()
 
 	// Pre-allocate collector capacity
-	initialCap := totalRequests
+	initialCap := opts.TotalRequests
 	if isDurationMode {
-		initialCap = concurrency * 1000
+		initialCap = opts.Concurrency * 1000
 	}
 	collector := stats.NewCollector(initialCap)
 
 	// Setup rate limiter
-	limiter := request.NewRateLimiter(rate)
+	limiter := request.NewRateLimiter(opts.Rate)
 	defer limiter.Stop()
 
 	// Setup live progress display
 	var progress *ui.Progress
 	if !isJSON {
-		progress = ui.NewProgress(w, int64(totalRequests), isDurationMode, duration)
+		progress = ui.NewProgress(w, int64(opts.TotalRequests), isDurationMode, opts.Duration)
 		progress.Start()
 	}
 
 	// Worker pool
-	jobs := make(chan struct{}, concurrency*2)
-	results := make(chan request.Result, concurrency*2)
+	jobs := make(chan struct{}, opts.Concurrency*2)
+	results := make(chan request.Result, opts.Concurrency*2)
 	var wg sync.WaitGroup
 
 	// Start workers
-	for i := 0; i < concurrency; i++ {
+	for i := 0; i < opts.Concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -350,7 +396,7 @@ func RunStressTest(
 							}
 						}
 					}()
-					results <- request.ExecuteRequest(ctx, client, method, targetURL, headers, body, contentType, expectStatus, expectBody)
+					results <- request.ExecuteRequest(ctx, client, opts.Method, opts.TargetURL, opts.Headers, opts.Body, opts.ContentType, opts.ExpectStatus, opts.ExpectBody)
 				}()
 			}
 		}()
@@ -371,7 +417,7 @@ func RunStressTest(
 				}
 			}
 		} else {
-			for i := 0; i < totalRequests; i++ {
+			for i := 0; i < opts.TotalRequests; i++ {
 				if !limiter.Wait(ctx) {
 					return
 				}
@@ -391,7 +437,7 @@ func RunStressTest(
 	}()
 
 	// Process results
-	batchSize := max(1, concurrency/2)
+	batchSize := max(1, opts.Concurrency/2)
 	batch := make([]request.Result, 0, batchSize)
 
 	for res := range results {
@@ -399,7 +445,7 @@ func RunStressTest(
 
 		if len(batch) >= batchSize {
 			for _, result := range batch {
-				collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error)
+				collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error, result.ResponseSize)
 			}
 			if progress != nil {
 				progress.Add(int64(len(batch)))
@@ -411,7 +457,7 @@ func RunStressTest(
 	// Flush remaining batch
 	if len(batch) > 0 {
 		for _, result := range batch {
-			collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error)
+			collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error, result.ResponseSize)
 		}
 		if progress != nil {
 			progress.Add(int64(len(batch)))
@@ -438,32 +484,45 @@ func RunStressTest(
 		reqPerSec = float64(stat.Total) / totalTime
 	}
 
+	// Build JSON output (always needed for potential output-file)
+	output := ui.JSONOutput{
+		Config: ui.TestConfig{
+			URL:         opts.TargetURL,
+			Method:      opts.Method,
+			Concurrency: opts.Concurrency,
+			Timeout:     opts.Timeout.Seconds(),
+		},
+		Statistics: stat,
+		TotalTime:  totalTime,
+		ReqPerSec:  reqPerSec,
+	}
+	if isDurationMode {
+		output.Config.Duration = opts.Duration.String()
+	} else {
+		output.Config.Requests = opts.TotalRequests
+	}
+	if opts.Rate > 0 {
+		output.Config.Rate = opts.Rate
+	}
+
 	// Output results
 	if isJSON {
-		output := ui.JSONOutput{
-			Config: ui.TestConfig{
-				URL:         targetURL,
-				Method:      method,
-				Concurrency: concurrency,
-				Timeout:     timeout.Seconds(),
-			},
-			Statistics: stat,
-			TotalTime:  totalTime,
-			ReqPerSec:  reqPerSec,
-		}
-		if isDurationMode {
-			output.Config.Duration = duration.String()
-		} else {
-			output.Config.Requests = totalRequests
-		}
-		if rate > 0 {
-			output.Config.Rate = rate
-		}
 		if err := ui.PrintJSONResult(w, output); err != nil {
 			return err
 		}
 	} else {
 		ui.PrintTextResult(w, stat, totalTime, reqPerSec)
+	}
+
+	// Write results to file if requested
+	if opts.OutputFile != "" {
+		jsonData, err := json.MarshalIndent(output, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal output file JSON: %w", err)
+		}
+		if err := os.WriteFile(opts.OutputFile, jsonData, 0644); err != nil {
+			return fmt.Errorf("failed to write output file: %w", err)
+		}
 	}
 
 	if stat.Failures > 0 {

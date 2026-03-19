@@ -478,3 +478,94 @@ func TestExecuteRequest_StatusCodeClassification(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeError(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Get http://x: context deadline exceeded", "request timeout"},
+		{"Post http://x: context canceled", "request cancelled"},
+		{"dial tcp: connection refused", "connection refused"},
+		{"dial tcp: lookup x: no such host", "DNS resolution failed"},
+		{"read tcp: connection reset by peer", "connection reset"},
+		{"Get http://x: EOF", "connection closed (EOF)"},
+		{"tls: TLS handshake timeout", "TLS handshake failed"},
+		{"short error", "short error"},
+		{strings.Repeat("x", 100), strings.Repeat("x", 80) + "..."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := normalizeError(tt.input)
+			if result != tt.expected {
+				t.Errorf("normalizeError(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExecuteRequest_ExpectStatusMatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated) // 201
+	}))
+	defer server.Close()
+
+	client := server.Client()
+
+	// Expect 201, server returns 201 → should succeed
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 201, "")
+	if !result.OK {
+		t.Errorf("expected OK=true when expect-status matches, got error: %s", result.Error)
+	}
+
+	// Expect 200, server returns 201 → should fail
+	result = ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 200, "")
+	if result.OK {
+		t.Error("expected OK=false when expect-status doesn't match")
+	}
+	if !strings.Contains(result.Error, "expected status 200") {
+		t.Errorf("error should mention expected status, got: %s", result.Error)
+	}
+}
+
+func TestExecuteRequest_ExpectBodyMatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok","data":"hello world"}`))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+
+	// Body contains expected substring → success
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "hello world")
+	if !result.OK {
+		t.Errorf("expected OK=true when body matches, got error: %s", result.Error)
+	}
+
+	// Body doesn't contain expected substring → failure
+	result = ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "not found text")
+	if result.OK {
+		t.Error("expected OK=false when body doesn't match")
+	}
+	if result.Error != "response body missing expected content" {
+		t.Errorf("error = %q, want %q", result.Error, "response body missing expected content")
+	}
+}
+
+func TestExecuteRequest_ResponseSize(t *testing.T) {
+	body := strings.Repeat("x", 1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if result.ResponseSize != 1024 {
+		t.Errorf("ResponseSize = %d, want 1024", result.ResponseSize)
+	}
+}
