@@ -4,13 +4,13 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +18,7 @@ import (
 
 	"api-stress-test/internal/request"
 	"api-stress-test/internal/stats"
+	"api-stress-test/internal/ui"
 
 	"github.com/spf13/cobra"
 )
@@ -31,21 +32,27 @@ var validMethods = map[string]bool{
 // Execute sets up the Cobra root command and runs the CLI.
 func Execute() {
 	var (
-		targetURL       string
-		method          string
-		requests        int
-		concurrency     int
-		timeout         float64
-		headers         string
-		data            string
-		jsonBody        string
-		jsonFile        string
-		rawBody         string
-		rawFile         string
-		contentTypeFlag string
-		rate            float64
-		duration        string
-		outputFormat    string
+		targetURL        string
+		method           string
+		requests         int
+		concurrency      int
+		timeout          float64
+		headers          string
+		data             string
+		jsonBody         string
+		jsonFile         string
+		rawBody          string
+		rawFile          string
+		contentTypeFlag  string
+		rate             float64
+		duration         string
+		outputFormat     string
+		insecure         bool
+		disableKeepalive bool
+		disableRedirects bool
+		expectStatus     int
+		expectBody       string
+		warmup           string
 	)
 
 	rootCmd := &cobra.Command{
@@ -57,40 +64,42 @@ func Execute() {
   api-stress-test --url http://example.com/api --headers "Authorization:Bearer token;Accept:application/json"
   api-stress-test --url http://example.com/api --duration 30s --concurrency 20
   api-stress-test --url http://example.com/api --requests 500 --rate 50
-  api-stress-test --url http://example.com/api --requests 100 --output json`,
+  api-stress-test --url http://example.com/api --requests 100 --output json
+  api-stress-test --url https://example.com/api --insecure --expect-status 200`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Validate URL
 			if err := ValidateURL(targetURL); err != nil {
 				return err
 			}
-
-			// Validate HTTP method
 			if err := ValidateMethod(method); err != nil {
 				return err
 			}
-
-			// Validate output format
 			if outputFormat != "text" && outputFormat != "json" {
 				return fmt.Errorf("unsupported output format: %s (supported: text, json)", outputFormat)
 			}
 
-			// Parse headers
 			parsedHeaders := request.ParseHeaders(headers)
 
-			// Parse form data
 			parsedData, err := request.ParseData(data)
 			if err != nil {
 				return fmt.Errorf("parsing --data: %w", err)
 			}
 
-			// Prepare body
 			body, contentType, err := request.PrepareBody(jsonBody, jsonFile, parsedData, rawBody, rawFile, contentTypeFlag)
 			if err != nil {
 				return fmt.Errorf("preparing body: %w", err)
 			}
 
-			// Validate and set defaults
+			if timeout <= 0 {
+				return fmt.Errorf("timeout must be positive (got %.2f)", timeout)
+			}
+			if cmd.Flags().Changed("rate") && rate <= 0 {
+				return fmt.Errorf("rate must be positive when specified (got %.2f)", rate)
+			}
+			if concurrency > 10000 {
+				return fmt.Errorf("concurrency too high: %d (max 10000)", concurrency)
+			}
+
 			if requests <= 0 {
 				requests = 100
 			}
@@ -98,7 +107,6 @@ func Execute() {
 				concurrency = 10
 			}
 
-			// Parse duration if provided
 			var dur time.Duration
 			if duration != "" {
 				dur, err = time.ParseDuration(duration)
@@ -107,7 +115,16 @@ func Execute() {
 				}
 			}
 
+			var warmupDur time.Duration
+			if warmup != "" {
+				warmupDur, err = time.ParseDuration(warmup)
+				if err != nil {
+					return fmt.Errorf("invalid warmup duration: %w", err)
+				}
+			}
+
 			return RunStressTest(
+				os.Stdout,
 				targetURL,
 				strings.ToUpper(method),
 				requests,
@@ -119,6 +136,12 @@ func Execute() {
 				rate,
 				dur,
 				outputFormat,
+				insecure,
+				disableKeepalive,
+				disableRedirects,
+				expectStatus,
+				expectBody,
+				warmupDur,
 			)
 		},
 	}
@@ -127,7 +150,7 @@ func Execute() {
 	rootCmd.Flags().StringVar(&targetURL, "url", "", "Target URL (required)")
 	_ = rootCmd.MarkFlagRequired("url")
 
-	// Optional flags
+	// Request options
 	rootCmd.Flags().StringVar(&method, "method", "GET", "HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)")
 	rootCmd.Flags().IntVar(&requests, "requests", 100, "Total requests to send")
 	rootCmd.Flags().IntVar(&concurrency, "concurrency", 10, "Number of concurrent workers")
@@ -140,9 +163,23 @@ func Execute() {
 	rootCmd.Flags().StringVar(&rawFile, "file", "", "Path to file for body")
 	rootCmd.Flags().StringVar(&contentTypeFlag, "content-type", "", "Explicit Content-Type header")
 
-	// New feature flags
+	// Load control
 	rootCmd.Flags().Float64Var(&rate, "rate", 0, "Max requests per second (0 = unlimited)")
 	rootCmd.Flags().StringVar(&duration, "duration", "", "Test duration (e.g., 30s, 1m) instead of fixed request count")
+
+	// Transport tuning
+	rootCmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS certificate verification")
+	rootCmd.Flags().BoolVar(&disableKeepalive, "disable-keepalive", false, "Disable HTTP keep-alive (new connection per request)")
+	rootCmd.Flags().BoolVar(&disableRedirects, "disable-redirects", false, "Do not follow HTTP redirects")
+
+	// Response validation
+	rootCmd.Flags().IntVar(&expectStatus, "expect-status", 0, "Expected HTTP status code (others count as failure)")
+	rootCmd.Flags().StringVar(&expectBody, "expect-body", "", "Expected substring in response body")
+
+	// Warm-up
+	rootCmd.Flags().StringVar(&warmup, "warmup", "", "Warm-up duration before recording stats (e.g., 5s)")
+
+	// Output
 	rootCmd.Flags().StringVar(&outputFormat, "output", "text", "Output format: text or json")
 
 	// Mutual exclusivity
@@ -154,27 +191,10 @@ func Execute() {
 	}
 }
 
-// TestConfig holds the test configuration for JSON output.
-type TestConfig struct {
-	URL         string `json:"url"`
-	Method      string `json:"method"`
-	Requests    int    `json:"requests,omitempty"`
-	Duration    string `json:"duration,omitempty"`
-	Concurrency int    `json:"concurrency"`
-	Timeout     float64 `json:"timeout_seconds"`
-	Rate        float64 `json:"rate,omitempty"`
-}
-
-// JSONOutput wraps the full result for JSON output format.
-type JSONOutput struct {
-	Config     TestConfig       `json:"config"`
-	Statistics stats.Statistics  `json:"statistics"`
-	TotalTime  float64          `json:"total_time_seconds"`
-	ReqPerSec  float64          `json:"requests_per_second"`
-}
-
 // RunStressTest runs the HTTP stress test and returns an error if there are failures.
+// Output is written to w; pass os.Stdout for normal CLI usage.
 func RunStressTest(
+	w io.Writer,
 	targetURL string,
 	method string,
 	totalRequests int,
@@ -186,30 +206,22 @@ func RunStressTest(
 	rate float64,
 	duration time.Duration,
 	outputFormat string,
+	insecure bool,
+	disableKeepalive bool,
+	disableRedirects bool,
+	expectStatus int,
+	expectBody string,
+	warmup time.Duration,
 ) error {
 	isJSON := outputFormat == "json"
 	isDurationMode := duration > 0
 
 	if !isJSON {
-		fmt.Printf("Target URL            : %s\n", targetURL)
-		fmt.Printf("HTTP method           : %s\n", method)
+		durationStr := ""
 		if isDurationMode {
-			fmt.Printf("Duration              : %s\n", duration)
-		} else {
-			fmt.Printf("Total requests        : %d\n", totalRequests)
+			durationStr = duration.String()
 		}
-		fmt.Printf("Concurrency (workers) : %d\n", concurrency)
-		fmt.Printf("Timeout per request   : %.1f seconds\n", timeout.Seconds())
-		if rate > 0 {
-			fmt.Printf("Rate limit            : %.0f req/s\n", rate)
-		}
-		if len(body) > 0 {
-			fmt.Printf("Body size             : %d bytes\n", len(body))
-			if contentType != "" {
-				fmt.Printf("Content-Type          : %s\n", contentType)
-			}
-		}
-		fmt.Println(strings.Repeat("-", 60))
+		ui.PrintHeader(w, targetURL, method, totalRequests, concurrency, timeout.Seconds(), rate, isDurationMode, durationStr, len(body), contentType)
 	}
 
 	// Configure HTTP Transport
@@ -217,10 +229,61 @@ func RunStressTest(
 		MaxIdleConns:        concurrency,
 		MaxIdleConnsPerHost: concurrency,
 		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   disableKeepalive,
 	}
+	if insecure {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	}
+
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   timeout,
+	}
+	if disableRedirects {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+
+	// Run warm-up phase (requests without recording stats)
+	if warmup > 0 {
+		if !isJSON {
+			fmt.Fprintf(w, "Warming up for %s...\n", warmup)
+		}
+		warmCtx, warmCancel := context.WithTimeout(context.Background(), warmup)
+		defer warmCancel() // Bug 3 fix: defer cancel immediately
+
+		// Bug 4 fix: handle signals during warmup
+		warmSigChan := make(chan os.Signal, 1)
+		signal.Notify(warmSigChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			select {
+			case <-warmSigChan:
+				warmCancel()
+			case <-warmCtx.Done():
+			}
+		}()
+
+		var warmWg sync.WaitGroup
+		for i := 0; i < concurrency; i++ {
+			warmWg.Add(1)
+			go func() {
+				defer warmWg.Done()
+				for warmCtx.Err() == nil {
+					res := request.ExecuteRequest(warmCtx, client, method, targetURL, headers, body, contentType, 0, "")
+					// Bug 5 fix: back off on failure to prevent CPU spin
+					if !res.OK && res.Elapsed < 0.01 {
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+			}()
+		}
+		warmWg.Wait()
+		signal.Stop(warmSigChan)
+		if !isJSON {
+			fmt.Fprintln(w, "Warm-up complete. Starting test...")
+			fmt.Fprintln(w, strings.Repeat("-", 60))
+		}
 	}
 
 	// Setup context with graceful shutdown
@@ -235,10 +298,11 @@ func RunStressTest(
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 	go func() {
 		<-sigChan
 		if !isJSON {
-			fmt.Println("\nStopping requests... (waiting for active workers to finish)")
+			fmt.Fprintln(w, "\nStopping requests... (waiting for active workers to finish)")
 		}
 		cancel()
 	}()
@@ -256,6 +320,13 @@ func RunStressTest(
 	limiter := request.NewRateLimiter(rate)
 	defer limiter.Stop()
 
+	// Setup live progress display
+	var progress *ui.Progress
+	if !isJSON {
+		progress = ui.NewProgress(w, int64(totalRequests), isDurationMode, duration)
+		progress.Start()
+	}
+
 	// Worker pool
 	jobs := make(chan struct{}, concurrency*2)
 	results := make(chan request.Result, concurrency*2)
@@ -270,8 +341,17 @@ func RunStressTest(
 				if ctx.Err() != nil {
 					return
 				}
-				result := request.ExecuteRequest(ctx, client, method, targetURL, headers, body, contentType)
-				results <- result
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							results <- request.Result{
+								OK:    false,
+								Error: fmt.Sprintf("panic: %v", r),
+							}
+						}
+					}()
+					results <- request.ExecuteRequest(ctx, client, method, targetURL, headers, body, contentType, expectStatus, expectBody)
+				}()
 			}
 		}()
 	}
@@ -311,33 +391,36 @@ func RunStressTest(
 	}()
 
 	// Process results
-	completed := 0
 	batchSize := max(1, concurrency/2)
 	batch := make([]request.Result, 0, batchSize)
-	progressInterval := max(1, totalRequests/10)
 
 	for res := range results {
 		batch = append(batch, res)
-		completed++
 
-		if len(batch) >= batchSize || (!isDurationMode && completed == totalRequests) {
+		if len(batch) >= batchSize {
 			for _, result := range batch {
 				collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error)
 			}
+			if progress != nil {
+				progress.Add(int64(len(batch)))
+			}
 			batch = batch[:0]
-
-			if !isJSON && !isDurationMode && completed%progressInterval == 0 {
-				fmt.Printf("Completed %d/%d requests...\n", completed, totalRequests)
-			}
-			if !isJSON && isDurationMode && completed%max(1, concurrency*10) == 0 {
-				fmt.Printf("Completed %d requests (%.1fs elapsed)...\n", completed, time.Since(startTime).Seconds())
-			}
 		}
 	}
 
 	// Flush remaining batch
-	for _, result := range batch {
-		collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error)
+	if len(batch) > 0 {
+		for _, result := range batch {
+			collector.Record(result.StatusCode, result.Elapsed, result.OK, result.Error)
+		}
+		if progress != nil {
+			progress.Add(int64(len(batch)))
+		}
+	}
+
+	// Stop progress display
+	if progress != nil {
+		progress.Stop()
 	}
 
 	totalTime := time.Since(startTime).Seconds()
@@ -345,17 +428,20 @@ func RunStressTest(
 
 	if stat.Total == 0 {
 		if !isJSON {
-			fmt.Println("No requests were executed.")
+			fmt.Fprintln(w, "No requests were executed.")
 		}
 		return nil
 	}
 
-	reqPerSec := float64(stat.Total) / totalTime
+	var reqPerSec float64
+	if totalTime > 0 {
+		reqPerSec = float64(stat.Total) / totalTime
+	}
 
-	// JSON output
+	// Output results
 	if isJSON {
-		output := JSONOutput{
-			Config: TestConfig{
+		output := ui.JSONOutput{
+			Config: ui.TestConfig{
 				URL:         targetURL,
 				Method:      method,
 				Concurrency: concurrency,
@@ -373,54 +459,11 @@ func RunStressTest(
 		if rate > 0 {
 			output.Config.Rate = rate
 		}
-		data, err := json.MarshalIndent(output, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal JSON output: %w", err)
+		if err := ui.PrintJSONResult(w, output); err != nil {
+			return err
 		}
-		fmt.Println(string(data))
 	} else {
-		// Text output
-		fmt.Println()
-		fmt.Println(strings.Repeat("=", 60))
-		fmt.Println("Stress test finished")
-		fmt.Println(strings.Repeat("=", 60))
-		fmt.Printf("Total time            : %.4f seconds\n", totalTime)
-		fmt.Printf("Requests per second   : %.2f req/s\n", reqPerSec)
-		fmt.Printf("Successes             : %d\n", stat.Successes)
-		fmt.Printf("Failures              : %d\n", stat.Failures)
-		fmt.Println("Status codes          :")
-
-		var statusKeys []int
-		for k := range stat.StatusCount {
-			statusKeys = append(statusKeys, k)
-		}
-		sort.Ints(statusKeys)
-
-		for _, status := range statusKeys {
-			count := stat.StatusCount[status]
-			label := "ERROR/NO STATUS"
-			if status != 0 {
-				label = fmt.Sprintf("%d", status)
-			}
-			fmt.Printf("  %-15s %d\n", label, count)
-		}
-
-		fmt.Println()
-		fmt.Println("Latency (seconds)")
-		fmt.Printf("  Min                 : %.4f\n", stat.MinLatency)
-		fmt.Printf("  Max                 : %.4f\n", stat.MaxLatency)
-		fmt.Printf("  Average             : %.4f\n", stat.AvgLatency)
-		fmt.Printf("  p50                 : %.4f\n", stat.P50Latency)
-		fmt.Printf("  p90                 : %.4f\n", stat.P90Latency)
-		fmt.Printf("  p99                 : %.4f\n", stat.P99Latency)
-
-		if len(stat.TopErrors) > 0 {
-			fmt.Println()
-			fmt.Println("Top Errors            :")
-			for _, e := range stat.TopErrors {
-				fmt.Printf("  %-45s x %d\n", e.Message, e.Count)
-			}
-		}
+		ui.PrintTextResult(w, stat, totalTime, reqPerSec)
 	}
 
 	if stat.Failures > 0 {

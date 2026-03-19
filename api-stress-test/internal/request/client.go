@@ -61,7 +61,7 @@ func ParseHeaders(raw string) map[string]string {
 // ParseData parses form data from URL-encoded string format.
 // Expected format: 'key1=value1&key2=value2'
 // Returns nil, nil if the input string is empty.
-// Invalid entries (missing equals sign) are silently skipped.
+// Returns an error if any entry is missing the '=' separator.
 func ParseData(raw string) (map[string]string, error) {
 	if raw == "" {
 		return nil, nil
@@ -77,7 +77,7 @@ func ParseData(raw string) (map[string]string, error) {
 
 		idx := strings.Index(part, "=")
 		if idx == -1 {
-			continue
+			return nil, fmt.Errorf("invalid form data entry (missing '='): %q", part)
 		}
 
 		key := strings.TrimSpace(part[:idx])
@@ -162,10 +162,8 @@ func PrepareBody(
 }
 
 // ExecuteRequest executes a single HTTP request and measures its performance.
-// It creates the request with the provided method, URL, headers, and body,
-// executes it using the given HTTP client, and records the elapsed time.
-// The response body is drained to allow connection reuse.
-// Returns a Result containing the request outcome and metrics.
+// expectStatus > 0 means only that specific status counts as success.
+// expectBody non-empty means the response body must contain that substring.
 func ExecuteRequest(
 	ctx context.Context,
 	client *http.Client,
@@ -173,6 +171,8 @@ func ExecuteRequest(
 	headers map[string]string,
 	body []byte,
 	contentType string,
+	expectStatus int,
+	expectBody string,
 ) Result {
 	startedAt := time.Now()
 
@@ -190,7 +190,6 @@ func ExecuteRequest(
 		}
 	}
 
-	// Set headers
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -198,7 +197,6 @@ func ExecuteRequest(
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	// Execute request
 	resp, err := client.Do(req)
 	elapsed := time.Since(startedAt).Seconds()
 
@@ -206,21 +204,70 @@ func ExecuteRequest(
 		return Result{
 			OK:      false,
 			Elapsed: elapsed,
-			Error:   err.Error(),
+			Error:   normalizeError(err.Error()),
 		}
 	}
 	defer resp.Body.Close()
-	// Drain response body completely to allow HTTP connection reuse
-	// This improves performance when making multiple requests to the same host
-	io.Copy(io.Discard, resp.Body)
+
+	// Read limited body for validation or drain for connection reuse
+	var respBody []byte
+	if expectBody != "" {
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	} else {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	}
 
 	statusCode := resp.StatusCode
-	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+
+	// Determine success
+	var ok bool
+	var errMsg string
+	if expectStatus > 0 {
+		ok = statusCode == expectStatus
+		if !ok {
+			errMsg = fmt.Sprintf("expected status %d, got %d", expectStatus, statusCode)
+		}
+	} else {
+		ok = statusCode >= 200 && statusCode < 300
+	}
+
+	if ok && expectBody != "" {
+		if !strings.Contains(string(respBody), expectBody) {
+			ok = false
+			errMsg = "response body missing expected content"
+		}
+	}
 
 	return Result{
 		OK:         ok,
 		StatusCode: statusCode,
 		Elapsed:    elapsed,
-		Error:      "",
+		Error:      errMsg,
+	}
+}
+
+// normalizeError maps verbose Go HTTP error messages to concise categories
+// for better grouping in the Top Errors output.
+func normalizeError(msg string) string {
+	switch {
+	case strings.Contains(msg, "context deadline exceeded"):
+		return "request timeout"
+	case strings.Contains(msg, "context canceled"):
+		return "request cancelled"
+	case strings.Contains(msg, "connection refused"):
+		return "connection refused"
+	case strings.Contains(msg, "no such host"):
+		return "DNS resolution failed"
+	case strings.Contains(msg, "connection reset"):
+		return "connection reset"
+	case strings.Contains(msg, "EOF"):
+		return "connection closed (EOF)"
+	case strings.Contains(msg, "TLS handshake"):
+		return "TLS handshake failed"
+	default:
+		if len(msg) > 80 {
+			return msg[:80] + "..."
+		}
+		return msg
 	}
 }

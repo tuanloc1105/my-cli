@@ -1,9 +1,15 @@
 package request
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseHeaders(t *testing.T) {
@@ -76,6 +82,7 @@ func TestParseData(t *testing.T) {
 		input    string
 		expected map[string]string
 		wantNil  bool
+		wantErr  bool
 	}{
 		{
 			name:    "empty string",
@@ -93,9 +100,9 @@ func TestParseData(t *testing.T) {
 			expected: map[string]string{"name": "John", "age": "30", "city": "NYC"},
 		},
 		{
-			name:     "entry without equals skipped",
-			input:    "key=value&invalid&other=data",
-			expected: map[string]string{"key": "value", "other": "data"},
+			name:    "entry without equals returns error",
+			input:   "key=value&invalid&other=data",
+			wantErr: true,
 		},
 		{
 			name:     "whitespace trimmed",
@@ -103,15 +110,31 @@ func TestParseData(t *testing.T) {
 			expected: map[string]string{"key": "value", "other": "data"},
 		},
 		{
-			name:    "all entries invalid returns nil",
+			name:    "all entries invalid returns error",
 			input:   "noequalssign",
-			wantNil: true,
+			wantErr: true,
+		},
+		{
+			name:     "value with equals sign",
+			input:    "key=val=ue",
+			expected: map[string]string{"key": "val=ue"},
+		},
+		{
+			name:    "empty entries skipped",
+			input:   "key=value&&other=data",
+			expected: map[string]string{"key": "value", "other": "data"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := ParseData(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -256,4 +279,202 @@ func TestPrepareBody(t *testing.T) {
 			t.Fatal("expected error for nonexistent file")
 		}
 	})
+}
+
+func TestExecuteRequest_Success200(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if !result.OK {
+		t.Errorf("expected OK=true, got false")
+	}
+	if result.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", result.StatusCode)
+	}
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if result.Elapsed <= 0 {
+		t.Errorf("elapsed = %f, want > 0", result.Elapsed)
+	}
+}
+
+func TestExecuteRequest_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if result.OK {
+		t.Errorf("expected OK=false for 500 status")
+	}
+	if result.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", result.StatusCode)
+	}
+}
+
+func TestExecuteRequest_Timeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &http.Client{Timeout: 50 * time.Millisecond}
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if result.OK {
+		t.Errorf("expected OK=false for timeout")
+	}
+	if result.Error == "" {
+		t.Errorf("expected error message for timeout")
+	}
+}
+
+func TestExecuteRequest_ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	client := server.Client()
+	result := ExecuteRequest(ctx, client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if result.OK {
+		t.Errorf("expected OK=false for cancelled context")
+	}
+	if result.Error == "" {
+		t.Errorf("expected error message for cancelled context")
+	}
+}
+
+func TestExecuteRequest_HeadersAndBody(t *testing.T) {
+	var receivedHeaders http.Header
+	var receivedBody string
+	var receivedMethod string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header
+		receivedMethod = r.Method
+		bodyBytes, _ := io.ReadAll(r.Body)
+		receivedBody = string(bodyBytes)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	headers := map[string]string{
+		"X-Custom":      "test-value",
+		"Authorization": "Bearer abc",
+	}
+	body := []byte(`{"key":"value"}`)
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "POST", server.URL, headers, body, "application/json", 0, "")
+
+	if !result.OK {
+		t.Fatalf("expected OK=true, got error: %s", result.Error)
+	}
+	if receivedMethod != "POST" {
+		t.Errorf("method = %q, want POST", receivedMethod)
+	}
+	if receivedHeaders.Get("X-Custom") != "test-value" {
+		t.Errorf("X-Custom header = %q, want %q", receivedHeaders.Get("X-Custom"), "test-value")
+	}
+	if receivedHeaders.Get("Authorization") != "Bearer abc" {
+		t.Errorf("Authorization header = %q, want %q", receivedHeaders.Get("Authorization"), "Bearer abc")
+	}
+	if receivedHeaders.Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", receivedHeaders.Get("Content-Type"), "application/json")
+	}
+	if receivedBody != `{"key":"value"}` {
+		t.Errorf("body = %q, want %q", receivedBody, `{"key":"value"}`)
+	}
+}
+
+func TestExecuteRequest_LargeResponseDrained(t *testing.T) {
+	// Server returns a large response; verify it doesn't cause issues
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(strings.Repeat("x", 1024*512))) // 512KB
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if !result.OK {
+		t.Errorf("expected OK=true, got error: %s", result.Error)
+	}
+}
+
+func TestExecuteRequest_NoBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bodyBytes) > 0 {
+				t.Errorf("expected empty body, got %d bytes", len(bodyBytes))
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+	if !result.OK {
+		t.Errorf("expected OK=true, got error: %s", result.Error)
+	}
+}
+
+func TestExecuteRequest_StatusCodeClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		wantOK     bool
+	}{
+		{"200 OK", 200, true},
+		{"201 Created", 201, true},
+		{"204 No Content", 204, true},
+		{"299 edge", 299, true},
+		{"301 Redirect", 301, false},
+		{"400 Bad Request", 400, false},
+		{"404 Not Found", 404, false},
+		{"500 Internal", 500, false},
+		{"503 Unavailable", 503, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer server.Close()
+
+			client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			}}
+			result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "")
+
+			if result.OK != tt.wantOK {
+				t.Errorf("status %d: OK = %v, want %v", tt.statusCode, result.OK, tt.wantOK)
+			}
+			if result.StatusCode != tt.statusCode {
+				t.Errorf("status = %d, want %d", result.StatusCode, tt.statusCode)
+			}
+		})
+	}
 }

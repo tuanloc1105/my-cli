@@ -125,7 +125,7 @@ func TestCollectorConcurrency(t *testing.T) {
 	wg.Wait()
 	stat := c.GetStatistics()
 
-	expected := numGoroutines * recordsPerGoroutine
+	expected := int64(numGoroutines * recordsPerGoroutine)
 	if stat.Total != expected {
 		t.Errorf("total = %d, want %d", stat.Total, expected)
 	}

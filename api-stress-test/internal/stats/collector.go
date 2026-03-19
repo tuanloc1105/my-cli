@@ -3,53 +3,79 @@
 package stats
 
 import (
+	"math/rand/v2"
 	"sort"
 	"sync"
+	"time"
 )
+
+const reservoirSize = 10000 // Max latency samples for percentile calculation
 
 // Collector collects and calculates statistics for stress test results.
 // It is thread-safe and designed to handle concurrent result recording.
-// The collector maintains latency data for percentile calculations and
-// tracks success/failure counts and HTTP status code distribution.
+// Uses reservoir sampling to bound memory for latency percentiles.
 type Collector struct {
-	mu            sync.Mutex      // Protects all fields from concurrent access
-	successes     int64           // Count of successful requests (2xx status)
-	failures      int64           // Count of failed requests
-	latencies     []float64       // All recorded latencies (for percentile calculation)
+	mu            sync.Mutex
+	successes     int64
+	failures      int64
+	totalCount    int64           // Total requests recorded
+	reservoir     []float64       // Reservoir-sampled latencies (max reservoirSize)
+	latencySum    float64         // Running sum for average calculation
 	statusCount   map[int]int     // Distribution of HTTP status codes
 	errorMessages map[string]int  // Error message frequency
-	minLatency    float64         // Minimum observed latency
-	maxLatency    float64         // Maximum observed latency
-	firstLatency  bool            // Flag to initialize min/max on first record
+	minLatency    float64
+	maxLatency    float64
+	firstLatency  bool
+	startTime     int64           // Unix timestamp when first record was added
+	throughput    map[int]int     // Per-second request counts (second offset -> count)
 }
 
-// NewCollector creates a new statistics collector with pre-allocated capacity.
-// The initialCapacity parameter helps optimize memory allocation by reserving
-// space for the expected number of latency records.
+// NewCollector creates a new statistics collector.
 func NewCollector(initialCapacity int) *Collector {
+	cap := initialCapacity
+	if cap > reservoirSize {
+		cap = reservoirSize
+	}
 	return &Collector{
-		latencies:     make([]float64, 0, initialCapacity),
+		reservoir:     make([]float64, 0, cap),
 		statusCount:   make(map[int]int),
 		errorMessages: make(map[string]int),
+		throughput:    make(map[int]int),
 		firstLatency:  true,
 	}
 }
 
 // Record adds a request result to the collector in a thread-safe manner.
-// It updates success/failure counts, latency tracking, status code distribution,
-// and error message tracking.
 func (c *Collector) Record(statusCode int, elapsed float64, ok bool, errorMsg string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.latencies = append(c.latencies, elapsed)
+	c.totalCount++
+	c.latencySum += elapsed
 	c.statusCount[statusCode]++
+
+	// Track throughput per second
+	now := time.Now().Unix()
+	if c.startTime == 0 {
+		c.startTime = now
+	}
+	sec := int(now - c.startTime)
+	c.throughput[sec]++
+
+	// Reservoir sampling: keep exactly reservoirSize samples with uniform probability
+	if int(c.totalCount) <= reservoirSize {
+		c.reservoir = append(c.reservoir, elapsed)
+	} else {
+		j := rand.IntN(int(c.totalCount))
+		if j < reservoirSize {
+			c.reservoir[j] = elapsed
+		}
+	}
 
 	if errorMsg != "" {
 		c.errorMessages[errorMsg]++
 	}
 
-	// Track min/max latency in real-time
 	if c.firstLatency {
 		c.minLatency = elapsed
 		c.maxLatency = elapsed
@@ -76,60 +102,65 @@ type ErrorEntry struct {
 	Count   int    `json:"count"`
 }
 
+// HistogramBucket represents a single bucket in a latency histogram.
+type HistogramBucket struct {
+	MinSec float64 `json:"min_sec"`
+	MaxSec float64 `json:"max_sec"`
+	Count  int     `json:"count"`
+}
+
+// ThroughputEntry records requests completed in a one-second interval.
+type ThroughputEntry struct {
+	Second   int `json:"second"`
+	Requests int `json:"requests"`
+}
+
 // Statistics holds the calculated final statistics from a stress test run.
-// All latency values are in seconds.
 type Statistics struct {
-	Successes   int64        `json:"successes"`
-	Failures    int64        `json:"failures"`
-	Total       int          `json:"total"`
-	StatusCount map[int]int  `json:"status_count"`
-	MinLatency  float64      `json:"min_latency"`
-	MaxLatency  float64      `json:"max_latency"`
-	AvgLatency  float64      `json:"avg_latency"`
-	P50Latency  float64      `json:"p50_latency"`
-	P90Latency  float64      `json:"p90_latency"`
-	P99Latency  float64      `json:"p99_latency"`
-	TopErrors   []ErrorEntry `json:"top_errors,omitempty"`
+	Successes   int64              `json:"successes"`
+	Failures    int64              `json:"failures"`
+	Total       int64              `json:"total"`
+	StatusCount map[int]int        `json:"status_count"`
+	MinLatency  float64            `json:"min_latency"`
+	MaxLatency  float64            `json:"max_latency"`
+	AvgLatency  float64            `json:"avg_latency"`
+	P50Latency  float64            `json:"p50_latency"`
+	P90Latency  float64            `json:"p90_latency"`
+	P99Latency  float64            `json:"p99_latency"`
+	TopErrors   []ErrorEntry       `json:"top_errors,omitempty"`
+	Histogram   []HistogramBucket  `json:"histogram,omitempty"`
+	Throughput  []ThroughputEntry  `json:"throughput,omitempty"`
 }
 
 // GetStatistics calculates and returns final statistics from all collected results.
-// It sorts latencies, calculates percentiles using linear interpolation,
-// and creates a thread-safe copy of the status code distribution.
-// This operation should be called after all results have been recorded.
 func (c *Collector) GetStatistics() Statistics {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.latencies) == 0 {
+	if c.totalCount == 0 {
 		return Statistics{
 			StatusCount: make(map[int]int),
 		}
 	}
 
-	// Sort latencies for percentile calculation (create copy to avoid modifying original)
-	latencies := make([]float64, len(c.latencies))
-	copy(latencies, c.latencies)
-	sort.Float64s(latencies)
+	// Sort reservoir for percentile calculation
+	sorted := make([]float64, len(c.reservoir))
+	copy(sorted, c.reservoir)
+	sort.Float64s(sorted)
 
-	// Calculate average
-	avgLatency := 0.0
-	for _, l := range latencies {
-		avgLatency += l
-	}
-	avgLatency /= float64(len(latencies))
+	// Average from running sum (exact, not sampled)
+	avgLatency := c.latencySum / float64(c.totalCount)
 
-	// Calculate percentiles using linear interpolation for accuracy
-	p50 := percentile(latencies, 0.50) // Median
-	p90 := percentile(latencies, 0.90) // 90th percentile
-	p99 := percentile(latencies, 0.99) // 99th percentile
+	p50 := percentile(sorted, 0.50)
+	p90 := percentile(sorted, 0.90)
+	p99 := percentile(sorted, 0.99)
 
-	// Create a copy of statusCount for thread safety
 	statusCountCopy := make(map[int]int)
 	for k, v := range c.statusCount {
 		statusCountCopy[k] = v
 	}
 
-	// Collect top errors sorted by frequency (max 5)
+	// Top errors
 	var topErrors []ErrorEntry
 	for msg, count := range c.errorMessages {
 		topErrors = append(topErrors, ErrorEntry{Message: msg, Count: count})
@@ -141,10 +172,28 @@ func (c *Collector) GetStatistics() Statistics {
 		topErrors = topErrors[:5]
 	}
 
+	// Build histogram from sorted reservoir
+	histogram := buildHistogram(sorted, c.minLatency, c.maxLatency)
+
+	// Build throughput timeline
+	var throughput []ThroughputEntry
+	if len(c.throughput) > 0 {
+		maxSec := 0
+		for s := range c.throughput {
+			if s > maxSec {
+				maxSec = s
+			}
+		}
+		throughput = make([]ThroughputEntry, 0, maxSec+1)
+		for s := 0; s <= maxSec; s++ {
+			throughput = append(throughput, ThroughputEntry{Second: s + 1, Requests: c.throughput[s]})
+		}
+	}
+
 	return Statistics{
 		Successes:   c.successes,
 		Failures:    c.failures,
-		Total:       len(c.latencies),
+		Total:       c.totalCount,
 		StatusCount: statusCountCopy,
 		MinLatency:  c.minLatency,
 		MaxLatency:  c.maxLatency,
@@ -153,14 +202,50 @@ func (c *Collector) GetStatistics() Statistics {
 		P90Latency:  p90,
 		P99Latency:  p99,
 		TopErrors:   topErrors,
+		Histogram:   histogram,
+		Throughput:  throughput,
 	}
 }
 
+// buildHistogram creates 10 equal-width buckets spanning [min, max].
+func buildHistogram(sorted []float64, minVal, maxVal float64) []HistogramBucket {
+	if len(sorted) == 0 {
+		return nil
+	}
+
+	const numBuckets = 10
+	span := maxVal - minVal
+	if span <= 0 {
+		return []HistogramBucket{{MinSec: minVal, MaxSec: maxVal, Count: len(sorted)}}
+	}
+
+	bucketWidth := span / numBuckets
+	buckets := make([]HistogramBucket, numBuckets)
+	for i := range buckets {
+		buckets[i].MinSec = minVal + float64(i)*bucketWidth
+		buckets[i].MaxSec = minVal + float64(i+1)*bucketWidth
+	}
+
+	for _, v := range sorted {
+		idx := int((v - minVal) / bucketWidth)
+		if idx >= numBuckets {
+			idx = numBuckets - 1
+		}
+		if idx < 0 {
+			idx = 0
+		}
+		buckets[idx].Count++
+	}
+
+	// Remove trailing empty buckets
+	last := len(buckets) - 1
+	for last > 0 && buckets[last].Count == 0 {
+		last--
+	}
+	return buckets[:last+1]
+}
+
 // percentile calculates percentile using linear interpolation method.
-// This approach provides more accurate percentile values than simple array indexing.
-// The method uses the standard percentile formula: position = (N-1) * p,
-// where N is the number of elements and p is the percentile (0.0 to 1.0).
-// Linear interpolation between adjacent values provides smooth percentile estimates.
 func percentile(sorted []float64, p float64) float64 {
 	if len(sorted) == 0 {
 		return 0
@@ -170,17 +255,14 @@ func percentile(sorted []float64, p float64) float64 {
 	}
 
 	n := float64(len(sorted))
-	// Calculate position using standard percentile formula: (N-1) * p
 	position := (n - 1) * p
 	lower := int(position)
 	upper := lower + 1
 
-	// Handle edge case where upper index would be out of bounds
 	if upper >= len(sorted) {
 		return sorted[len(sorted)-1]
 	}
 
-	// Perform linear interpolation between lower and upper values
 	weight := position - float64(lower)
 	return sorted[lower]*(1-weight) + sorted[upper]*weight
 }
