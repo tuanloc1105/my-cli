@@ -241,7 +241,11 @@ func ExecuteRequest(
 	if ok && expectBody != "" {
 		if !strings.Contains(string(respBody), expectBody) {
 			ok = false
-			errMsg = "response body missing expected content"
+			if responseSize >= maxResponseDrain {
+				errMsg = fmt.Sprintf("response body missing expected content (body truncated at %d bytes)", maxResponseDrain)
+			} else {
+				errMsg = "response body missing expected content"
+			}
 		}
 	}
 

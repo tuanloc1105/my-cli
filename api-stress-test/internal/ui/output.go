@@ -30,7 +30,14 @@ type colorWriter struct {
 }
 
 // newColorWriter creates a colorWriter, checking once whether the writer is a terminal.
+// Respects NO_COLOR (https://no-color.org/) and FORCE_COLOR environment variables.
 func newColorWriter(w io.Writer) *colorWriter {
+	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+		return &colorWriter{w: w, enabled: false}
+	}
+	if _, ok := os.LookupEnv("FORCE_COLOR"); ok {
+		return &colorWriter{w: w, enabled: true}
+	}
 	f, ok := w.(*os.File)
 	if !ok {
 		return &colorWriter{w: w, enabled: false}

@@ -554,6 +554,26 @@ func TestExecuteRequest_ExpectBodyMatch(t *testing.T) {
 	}
 }
 
+func TestExecuteRequest_ExpectBodyTruncationWarning(t *testing.T) {
+	// Server returns exactly maxResponseDrain bytes, simulating a truncated response
+	largeBody := strings.Repeat("a", maxResponseDrain)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(largeBody))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	result := ExecuteRequest(context.Background(), client, "GET", server.URL, nil, nil, "", 0, "not-in-body")
+
+	if result.OK {
+		t.Error("expected OK=false when body doesn't match")
+	}
+	if !strings.Contains(result.Error, "truncated") {
+		t.Errorf("expected truncation warning in error, got: %s", result.Error)
+	}
+}
+
 func TestExecuteRequest_ResponseSize(t *testing.T) {
 	body := strings.Repeat("x", 1024)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

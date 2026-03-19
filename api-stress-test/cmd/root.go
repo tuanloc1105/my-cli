@@ -186,7 +186,7 @@ func Execute() {
 	rootCmd.Flags().IntVar(&requests, "requests", 100, "Total requests to send")
 	rootCmd.Flags().IntVar(&concurrency, "concurrency", 10, "Number of concurrent workers")
 	rootCmd.Flags().Float64Var(&timeout, "timeout", 5.0, "Timeout per request in seconds")
-	rootCmd.Flags().StringVar(&headers, "headers", "", "Headers in 'key1:value1;key2:value2' format")
+	rootCmd.Flags().StringVar(&headers, "headers", "", "Headers in 'key1:value1;key2:value2' format (semicolon-delimited; values may contain commas but not semicolons)")
 	rootCmd.Flags().StringVar(&data, "data", "", "Form data in 'key1=value1&key2=value2' format")
 	rootCmd.Flags().StringVar(&jsonBody, "json-body", "", "JSON body string")
 	rootCmd.Flags().StringVar(&jsonFile, "json-file", "", "Path to JSON file for body")

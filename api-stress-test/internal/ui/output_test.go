@@ -164,6 +164,42 @@ func TestColorWriterDisabled(t *testing.T) {
 	}
 }
 
+func TestColorWriterNO_COLOR(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	var buf bytes.Buffer
+	cw := newColorWriter(&buf)
+	if cw.enabled {
+		t.Error("colorWriter should be disabled when NO_COLOR is set")
+	}
+	result := cw.colorize(colorRed, "test")
+	if result != "test" {
+		t.Errorf("expected plain 'test', got %q", result)
+	}
+}
+
+func TestColorWriterFORCE_COLOR(t *testing.T) {
+	t.Setenv("FORCE_COLOR", "1")
+	var buf bytes.Buffer
+	cw := newColorWriter(&buf)
+	if !cw.enabled {
+		t.Error("colorWriter should be enabled when FORCE_COLOR is set")
+	}
+	result := cw.colorize(colorRed, "test")
+	if !strings.Contains(result, "\033[31m") {
+		t.Errorf("expected ANSI red in output, got %q", result)
+	}
+}
+
+func TestColorWriterNO_COLOR_TakesPrecedence(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("FORCE_COLOR", "1")
+	var buf bytes.Buffer
+	cw := newColorWriter(&buf)
+	if cw.enabled {
+		t.Error("NO_COLOR should take precedence over FORCE_COLOR")
+	}
+}
+
 func TestRenderBar(t *testing.T) {
 	tests := []struct {
 		name string
