@@ -51,24 +51,24 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CORR-01 | Pending | Pending |
-| CORR-02 | Pending | Pending |
-| PERF-01 | Pending | Pending |
-| PERF-02 | Pending | Pending |
-| PERF-03 | Pending | Pending |
-| PERF-04 | Pending | Pending |
-| TRAN-01 | Pending | Pending |
-| TRAN-02 | Pending | Pending |
-| TRAN-03 | Pending | Pending |
-| TRAN-04 | Pending | Pending |
-| VALD-01 | Pending | Pending |
-| VALD-02 | Pending | Pending |
+| CORR-01 | Phase 1 | Pending |
+| CORR-02 | Phase 1 | Pending |
+| PERF-01 | Phase 1 | Pending |
+| PERF-02 | Phase 1 | Pending |
+| PERF-03 | Phase 1 | Pending |
+| PERF-04 | Phase 1 | Pending |
+| TRAN-01 | Phase 2 | Pending |
+| TRAN-02 | Phase 2 | Pending |
+| TRAN-03 | Phase 2 | Pending |
+| TRAN-04 | Phase 2 | Pending |
+| VALD-01 | Phase 3 | Pending |
+| VALD-02 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 12 total
-- Mapped to phases: 0
-- Unmapped: 12 (pending roadmap creation)
+- Mapped to phases: 12
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-27*
-*Last updated: 2026-03-27 after initial definition*
+*Last updated: 2026-03-27 after roadmap creation*
