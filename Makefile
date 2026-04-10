@@ -12,6 +12,14 @@ ifneq (,$(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S)))
     export TEMP := $(shell cygpath -w /tmp)
     export GOPATH := $(HOME)/go
     export GOCACHE := $(HOME)/go/cache
+else ifeq ($(UNAME_S),Darwin)
+    GOOS       = darwin
+    GOARCH     =
+    EXT        =
+    INSTALL_DIR = $(HOME)/dev-kit/tool
+    INSTALL     = mv -f
+    CASE_NAME   = c
+    CLEAN_CMD   = rm -f
 else
     GOOS       = linux
     GOARCH     =
