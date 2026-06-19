@@ -3,6 +3,7 @@ package ui
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -25,6 +26,24 @@ const (
 	ColorBold      = "\033[1m"
 	ColorUnderline = "\033[4m"
 )
+
+const (
+	LargeResultsActionAsk     = "ask"
+	LargeResultsActionSave    = "save"
+	LargeResultsActionDisplay = "display"
+)
+
+// ResultsOutputOptions controls how search results are printed or saved.
+type ResultsOutputOptions struct {
+	ShowDetails        bool
+	Pattern            string
+	BasePath           string
+	NoSort             bool
+	LargeResultsAction string
+	OutputPath         string
+	PromptReader       io.Reader
+	PromptWriter       io.Writer
+}
 
 // ProgressTracker tracks search progress
 type ProgressTracker struct {
@@ -91,18 +110,20 @@ func sortResults(files []types.FileResult, dirs []string) {
 	wg.Wait()
 }
 
-func SaveResultsToFile(files []types.FileResult, dirs []string, pattern, basePath string, showDetails bool, noSort bool) string {
-	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("search_results_%s.txt", timestamp)
+func SaveResultsToFile(files []types.FileResult, dirs []string, pattern, basePath string, showDetails bool, noSort bool, outputPath string) (string, error) {
+	filename := outputPath
+	if filename == "" {
+		timestamp := time.Now().Format("20060102_150405")
+		filename = fmt.Sprintf("search_results_%s.txt", timestamp)
+	}
 
 	file, err := os.Create(filename)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer file.Close()
 
 	writer := bufio.NewWriter(file)
-	defer writer.Flush()
 
 	fmt.Fprintf(writer, "Enhanced File and Directory Finder Results\n")
 	fmt.Fprintf(writer, "%s\n", strings.Repeat("=", 80))
@@ -140,28 +161,57 @@ func SaveResultsToFile(files []types.FileResult, dirs []string, pattern, basePat
 		fmt.Fprintf(writer, "\n")
 	}
 
-	return filename
-}
-
-func PrintResults(files []types.FileResult, dirs []string, showDetails bool, pattern, basePath string, noSort bool) {
-	totalResults := len(files) + len(dirs)
-
-	// If results exceed 100, save to file instead of printing
-	if totalResults > 100 {
-		filename := SaveResultsToFile(files, dirs, pattern, basePath, showDetails, noSort)
-		fmt.Printf("\n%s%sSearch Results:%s\n", ColorBold, ColorHeader, ColorEndC)
-		fmt.Printf("%sFiles found: %d%s\n", ColorOKGreen, len(files), ColorEndC)
-		fmt.Printf("%sDirectories found: %d%s\n", ColorOKBlue, len(dirs), ColorEndC)
-		fmt.Printf("%sTotal results: %d (exceeds 100)%s\n", ColorWarning, totalResults, ColorEndC)
-		fmt.Printf("%sResults saved to: %s%s\n", ColorOKCyan, filename, ColorEndC)
-		return
+	if err := writer.Flush(); err != nil {
+		return "", err
 	}
 
-	// Print to console if results <= 100
-	fmt.Printf("\n%s%sSearch Results:%s\n", ColorBold, ColorHeader, ColorEndC)
-	fmt.Printf("%sFiles found: %d%s\n", ColorOKGreen, len(files), ColorEndC)
-	fmt.Printf("%sDirectories found: %d%s\n", ColorOKBlue, len(dirs), ColorEndC)
+	return filename, nil
+}
 
+func PrintResults(files []types.FileResult, dirs []string, options ResultsOutputOptions) error {
+	totalResults := len(files) + len(dirs)
+
+	if totalResults <= 100 {
+		printResultsSummary(len(files), len(dirs), totalResults, false)
+		printResultDetails(files, dirs, options.ShowDetails, options.NoSort)
+		return nil
+	}
+
+	printResultsSummary(len(files), len(dirs), totalResults, true)
+
+	action := strings.ToLower(strings.TrimSpace(options.LargeResultsAction))
+	if action == "" {
+		action = LargeResultsActionAsk
+	}
+
+	if action == LargeResultsActionAsk {
+		action = resolvePromptedLargeResultsAction(promptReader(options), promptWriter(options))
+	}
+
+	if action == LargeResultsActionDisplay {
+		printResultDetails(files, dirs, options.ShowDetails, options.NoSort)
+		return nil
+	}
+
+	filename, err := SaveResultsToFile(files, dirs, options.Pattern, options.BasePath, options.ShowDetails, options.NoSort, options.OutputPath)
+	if err != nil {
+		return fmt.Errorf("save results: %w", err)
+	}
+
+	fmt.Printf("%sResults saved to: %s%s\n", ColorOKCyan, filename, ColorEndC)
+	return nil
+}
+
+func printResultsSummary(filesCount, dirsCount, totalResults int, exceededLimit bool) {
+	fmt.Printf("\n%s%sSearch Results:%s\n", ColorBold, ColorHeader, ColorEndC)
+	fmt.Printf("%sFiles found: %d%s\n", ColorOKGreen, filesCount, ColorEndC)
+	fmt.Printf("%sDirectories found: %d%s\n", ColorOKBlue, dirsCount, ColorEndC)
+	if exceededLimit {
+		fmt.Printf("%sTotal results: %d (exceeds 100)%s\n", ColorWarning, totalResults, ColorEndC)
+	}
+}
+
+func printResultDetails(files []types.FileResult, dirs []string, showDetails bool, noSort bool) {
 	if !noSort {
 		sortResults(files, dirs)
 	}
@@ -183,4 +233,60 @@ func PrintResults(files []types.FileResult, dirs []string, showDetails bool, pat
 			fmt.Printf("  %s\n", dirPath)
 		}
 	}
+}
+
+func promptReader(options ResultsOutputOptions) io.Reader {
+	if options.PromptReader != nil {
+		return options.PromptReader
+	}
+	return os.Stdin
+}
+
+func promptWriter(options ResultsOutputOptions) io.Writer {
+	if options.PromptWriter != nil {
+		return options.PromptWriter
+	}
+	return os.Stdout
+}
+
+func resolvePromptedLargeResultsAction(reader io.Reader, writer io.Writer) string {
+	if !canPrompt(reader, writer) {
+		fmt.Fprintf(writer, "%sNon-interactive terminal detected; saving results to file.%s\n", ColorWarning, ColorEndC)
+		return LargeResultsActionSave
+	}
+
+	return promptLargeResultsAction(reader, writer)
+}
+
+func canPrompt(reader io.Reader, writer io.Writer) bool {
+	input, inputOK := reader.(*os.File)
+	output, outputOK := writer.(*os.File)
+	return inputOK && outputOK && isTerminal(input) && isTerminal(output)
+}
+
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
+}
+
+func promptLargeResultsAction(reader io.Reader, writer io.Writer) string {
+	scanner := bufio.NewScanner(reader)
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprint(writer, "Choose output: [s] save to file / [d] display in terminal: ")
+		if !scanner.Scan() {
+			return LargeResultsActionSave
+		}
+
+		answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		switch answer {
+		case "", "s", LargeResultsActionSave:
+			return LargeResultsActionSave
+		case "d", LargeResultsActionDisplay:
+			return LargeResultsActionDisplay
+		default:
+			fmt.Fprintln(writer, "Invalid choice. Please enter s/save or d/display.")
+		}
+	}
+
+	return LargeResultsActionSave
 }

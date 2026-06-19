@@ -16,17 +16,20 @@ import (
 
 func Execute() {
 	var (
-		caseSensitive   bool
-		maxWorkers      int
-		excludeDirs     []string
-		excludePatterns []string
-		fileTypes       []string
-		minSize         string
-		maxSize         string
-		maxResults      int
-		noProgress      bool
-		showDetails     bool
-		noSort          bool
+		caseSensitive      bool
+		maxWorkers         int
+		excludeDirs        []string
+		excludePatterns    []string
+		fileTypes          []string
+		minSize            string
+		maxSize            string
+		maxResults         int
+		noProgress         bool
+		showDetails        bool
+		noSort             bool
+		displayAll         bool
+		outputPath         string
+		largeResultsAction string
 	)
 
 	rootCmd := &cobra.Command{
@@ -44,6 +47,11 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 		RunE: func(cmd *cobra.Command, args []string) error {
 			basePath := args[0]
 			pattern := args[1]
+
+			resolvedLargeResultsAction, err := resolveLargeResultsAction(cmd, largeResultsAction, displayAll, outputPath)
+			if err != nil {
+				return err
+			}
 
 			// Parse size arguments
 			minSizeBytes, err := parseSize(minSize)
@@ -93,9 +101,14 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 			}
 
 			files, dirs := f.FindFilesAndDirs()
-			ui.PrintResults(files, dirs, showDetails, pattern, basePath, noSort)
-
-			return nil
+			return ui.PrintResults(files, dirs, ui.ResultsOutputOptions{
+				ShowDetails:        showDetails,
+				Pattern:            pattern,
+				BasePath:           basePath,
+				NoSort:             noSort,
+				LargeResultsAction: resolvedLargeResultsAction,
+				OutputPath:         outputPath,
+			})
 		},
 	}
 
@@ -111,11 +124,48 @@ support for glob patterns, size filtering, file type filtering, and exclusion ru
 	rootCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress display")
 	rootCmd.Flags().BoolVarP(&showDetails, "show-details", "d", false, "Show file sizes and details")
 	rootCmd.Flags().BoolVar(&noSort, "no-sort", false, "Skip sorting results (faster for large result sets)")
+	rootCmd.Flags().BoolVar(&displayAll, "display-all", false, "Display all results in terminal when result count exceeds 100")
+	rootCmd.Flags().StringVar(&outputPath, "output", "", "Save large result output to the specified file path")
+	rootCmd.Flags().StringVar(&largeResultsAction, "large-results-action", ui.LargeResultsActionAsk, "Action for more than 100 results: ask, save, or display")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Printf("%sError: %v%s\n", ui.ColorFail, err, ui.ColorEndC)
 		os.Exit(1)
 	}
+}
+
+func resolveLargeResultsAction(cmd *cobra.Command, action string, displayAll bool, outputPath string) (string, error) {
+	normalizedAction := strings.ToLower(strings.TrimSpace(action))
+	if normalizedAction == "" {
+		normalizedAction = ui.LargeResultsActionAsk
+	}
+
+	switch normalizedAction {
+	case ui.LargeResultsActionAsk, ui.LargeResultsActionSave, ui.LargeResultsActionDisplay:
+	default:
+		return "", fmt.Errorf("large-results-action must be one of: ask, save, display")
+	}
+
+	actionChanged := cmd.Flags().Changed("large-results-action")
+
+	if displayAll && actionChanged && normalizedAction == ui.LargeResultsActionSave {
+		return "", fmt.Errorf("--display-all conflicts with --large-results-action save")
+	}
+	if displayAll && outputPath != "" {
+		return "", fmt.Errorf("--display-all conflicts with --output")
+	}
+	if outputPath != "" && actionChanged && normalizedAction == ui.LargeResultsActionDisplay {
+		return "", fmt.Errorf("--output conflicts with --large-results-action display")
+	}
+
+	if displayAll {
+		return ui.LargeResultsActionDisplay, nil
+	}
+	if outputPath != "" && normalizedAction == ui.LargeResultsActionAsk {
+		return ui.LargeResultsActionSave, nil
+	}
+
+	return normalizedAction, nil
 }
 
 func parseSize(sizeStr string) (int64, error) {
