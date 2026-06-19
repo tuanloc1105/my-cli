@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"find-everything/internal/types"
+
+	"golang.org/x/term"
 )
 
 // Colors for terminal output
@@ -261,32 +263,70 @@ func resolvePromptedLargeResultsAction(reader io.Reader, writer io.Writer) strin
 func canPrompt(reader io.Reader, writer io.Writer) bool {
 	input, inputOK := reader.(*os.File)
 	output, outputOK := writer.(*os.File)
-	return inputOK && outputOK && isTerminal(input) && isTerminal(output)
-}
-
-func isTerminal(f *os.File) bool {
-	info, err := f.Stat()
-	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
+	return inputOK && outputOK && term.IsTerminal(int(input.Fd())) && term.IsTerminal(int(output.Fd()))
 }
 
 func promptLargeResultsAction(reader io.Reader, writer io.Writer) string {
-	scanner := bufio.NewScanner(reader)
+	restoreTerminal := enableSingleKeyInput(reader)
+	if restoreTerminal != nil {
+		defer restoreTerminal()
+	}
+
 	for attempt := 0; attempt < 3; attempt++ {
-		fmt.Fprint(writer, "Choose output: [s] save to file / [d] display in terminal: ")
-		if !scanner.Scan() {
+		fmt.Fprint(writer, "Choose output: press [s] save to file / [d] display in terminal: ")
+
+		answer, ok := readPromptChoice(reader)
+		if !ok {
 			return LargeResultsActionSave
 		}
 
-		answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
 		switch answer {
-		case "", "s", LargeResultsActionSave:
+		case "", "s":
+			fmt.Fprint(writer, "\r\n")
 			return LargeResultsActionSave
-		case "d", LargeResultsActionDisplay:
+		case "d":
+			fmt.Fprint(writer, "\r\n")
 			return LargeResultsActionDisplay
 		default:
-			fmt.Fprintln(writer, "Invalid choice. Please enter s/save or d/display.")
+			fmt.Fprint(writer, "\r\nInvalid choice. Please press s or d.\r\n")
 		}
 	}
 
 	return LargeResultsActionSave
+}
+
+func enableSingleKeyInput(reader io.Reader) func() {
+	input, ok := reader.(*os.File)
+	if !ok || !term.IsTerminal(int(input.Fd())) {
+		return nil
+	}
+
+	state, err := term.MakeRaw(int(input.Fd()))
+	if err != nil {
+		return nil
+	}
+
+	return func() {
+		_ = term.Restore(int(input.Fd()), state)
+	}
+}
+
+func readPromptChoice(reader io.Reader) (string, bool) {
+	var buffer [1]byte
+	for {
+		n, err := reader.Read(buffer[:])
+		if err != nil {
+			return "", false
+		}
+		if n == 0 {
+			continue
+		}
+
+		switch buffer[0] {
+		case '\r', '\n':
+			return "", true
+		default:
+			return strings.ToLower(string(buffer[0])), true
+		}
+	}
 }

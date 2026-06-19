@@ -70,7 +70,7 @@ func TestPromptLargeResultsAction(t *testing.T) {
 		{name: "short display", input: "d\n", want: LargeResultsActionDisplay},
 		{name: "word display", input: "display\n", want: LargeResultsActionDisplay},
 		{name: "empty defaults save", input: "\n", want: LargeResultsActionSave},
-		{name: "invalid defaults save after attempts", input: "x\ny\nz\n", want: LargeResultsActionSave},
+		{name: "invalid defaults save after attempts", input: "xyz", want: LargeResultsActionSave},
 	}
 
 	for _, tt := range tests {
