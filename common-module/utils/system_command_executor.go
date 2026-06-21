@@ -14,6 +14,8 @@ func CLS() {
 	switch runtime.GOOS {
 	case "linux":
 		cmd = exec.Command("clear") //Linux example, its tested
+	case "darwin":
+		cmd = exec.Command("sh", "-c", "clear && printf '\\e[3J'")
 	case "windows":
 		if os.Getenv("PROMPT") != "" {
 			cmd = exec.Command("cmd", "/c", "cls") //Windows example, its tested
