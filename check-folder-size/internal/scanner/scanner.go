@@ -27,8 +27,14 @@ type ScanOptions struct {
 	MaxDepth     int // 0 = unlimited
 }
 
+type ItemInfo struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	Type string `json:"type"`
+}
+
 type ScanResult struct {
-	Sizes        map[string]int64
+	Items        []ItemInfo
 	WarningCount int64
 }
 
@@ -228,12 +234,12 @@ func (pw *parallelWalker) run(initialTasks []walkTask) {
 
 // GetSizesOfSubfolders calculates sizes of immediate subfolders/files
 func GetSizesOfSubfolders(parentFolder string, opts ScanOptions) ScanResult {
-	result := make(map[string]int64)
+	var items []ItemInfo
 
 	entries, err := os.ReadDir(parentFolder)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error accessing %s: %v\n", parentFolder, err)
-		return ScanResult{Sizes: result, WarningCount: 1}
+		return ScanResult{Items: items, WarningCount: 1}
 	}
 
 	// Build exclude map for O(1) lookup
@@ -261,7 +267,8 @@ func GetSizesOfSubfolders(parentFolder string, opts ScanOptions) ScanResult {
 			})
 		} else {
 			if info, err := os.Stat(fullPath); err == nil {
-				result[entry.Name()] = info.Size()
+				name := entry.Name()
+				items = append(items, ItemInfo{Name: name, Size: info.Size(), Type: "file"})
 			} else {
 				fileWarnings++
 			}
@@ -269,7 +276,7 @@ func GetSizesOfSubfolders(parentFolder string, opts ScanOptions) ScanResult {
 	}
 
 	if len(initialTasks) == 0 {
-		return ScanResult{Sizes: result, WarningCount: fileWarnings}
+		return ScanResult{Items: items, WarningCount: fileWarnings}
 	}
 
 	// Create parallel walker — NumCPU workers regardless of top-level count,
@@ -292,7 +299,7 @@ func GetSizesOfSubfolders(parentFolder string, opts ScanOptions) ScanResult {
 
 	// Collect directory sizes into result
 	for name, sizePtr := range pw.sizes {
-		result[name] = atomic.LoadInt64(sizePtr)
+		items = append(items, ItemInfo{Name: name, Size: atomic.LoadInt64(sizePtr), Type: "directory"})
 	}
 
 	if opts.ShowProgress {
@@ -306,7 +313,7 @@ func GetSizesOfSubfolders(parentFolder string, opts ScanOptions) ScanResult {
 	}
 
 	return ScanResult{
-		Sizes:        result,
+		Items:        items,
 		WarningCount: totalWarnings,
 	}
 }

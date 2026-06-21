@@ -134,37 +134,29 @@ var RootCmd = &cobra.Command{
 		}
 
 		// Apply size filters
-		filteredSizes := result.Sizes
+		filteredItems := result.Items
 		if minSizeBytes > 0 || maxSizeBytes < (1<<63-1) {
-			filteredSizes = make(map[string]int64)
-			for name, size := range result.Sizes {
-				if size >= minSizeBytes && size <= maxSizeBytes {
-					filteredSizes[name] = size
+			filteredItems = make([]scanner.ItemInfo, 0, len(result.Items))
+			for _, item := range result.Items {
+				if item.Size >= minSizeBytes && item.Size <= maxSizeBytes {
+					filteredItems = append(filteredItems, item)
 				}
 			}
 		}
 
 		// Output results
 		if jsonOutput {
-			type jsonItem struct {
-				Name string `json:"name"`
-				Size int64  `json:"size"`
-			}
-			var items []jsonItem
-			for name, size := range filteredSizes {
-				items = append(items, jsonItem{Name: name, Size: size})
-			}
-			sort.Slice(items, func(i, j int) bool {
-				return items[i].Name < items[j].Name
+			sort.Slice(filteredItems, func(i, j int) bool {
+				return filteredItems[i].Name < filteredItems[j].Name
 			})
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			if err := enc.Encode(items); err != nil {
+			if err := enc.Encode(filteredItems); err != nil {
 				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
 				os.Exit(1)
 			}
 		} else {
-			ui.PrintResults(filteredSizes, parentFolder, sortBy, !asc)
+			ui.PrintResults(filteredItems, parentFolder, sortBy, !asc)
 		}
 	},
 }

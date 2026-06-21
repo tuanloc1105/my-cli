@@ -1,15 +1,11 @@
 package ui
 
 import (
+	"check-folder-size/internal/scanner"
 	"fmt"
 	"sort"
 	"strings"
 )
-
-type SizeInfo struct {
-	Name string
-	Size int64
-}
 
 type FormatResult struct {
 	Size  float64
@@ -51,16 +47,10 @@ func formatSize(size int64) FormatResult {
 }
 
 // PrintResults displays the folder analysis results
-func PrintResults(subfolderSizes map[string]int64, parentFolder, sortBy string, reverse bool) {
-	if len(subfolderSizes) == 0 {
+func PrintResults(items []scanner.ItemInfo, parentFolder, sortBy string, reverse bool) {
+	if len(items) == 0 {
 		fmt.Println("No accessible folders or files found.")
 		return
-	}
-
-	// Convert map to slice for sorting
-	var items []SizeInfo
-	for name, size := range subfolderSizes {
-		items = append(items, SizeInfo{name, size})
 	}
 
 	// Sort results
@@ -92,13 +82,14 @@ func PrintResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 	fmt.Printf("\n%s\n", strings.Repeat("=", 80))
 	fmt.Printf("📁 Parent Folder: %s\n", parentFolder)
 	fmt.Printf("📊 Total Size: %.2f %s\n", totalFormatted.Size, color(totalFormatted.Unit, totalFormatted.Color))
-	fmt.Printf("📈 Items Found: %d\n", len(subfolderSizes))
+	fmt.Printf("📈 Items Found: %d\n", len(items))
 	fmt.Printf("%s\n", strings.Repeat("=", 80))
 
 	// Print table header
 	const unitColWidth = 7 // max visible width: " bytes " = 7
-	fmt.Printf("%10s  %-*s  %s\n", "Size", unitColWidth, "Unit", "Name")
-	fmt.Printf("%10s  %-*s  %s\n", "----", unitColWidth, "----", "----")
+	const typeColWidth = 9 // "directory" = 9
+	fmt.Printf("%10s  %-*s  %-*s  %s\n", "Size", unitColWidth, "Unit", typeColWidth, "Type", "Name")
+	fmt.Printf("%10s  %-*s  %-*s  %s\n", "----", unitColWidth, "----", typeColWidth, "----", "----")
 
 	// Print items
 	for _, item := range items {
@@ -114,14 +105,7 @@ func PrintResults(subfolderSizes map[string]int64, parentFolder, sortBy string, 
 			padding = strings.Repeat(" ", padCount)
 		}
 
-		// Truncate long names (rune-safe for UTF-8)
-		displayName := item.Name
-		runes := []rune(displayName)
-		if len(runes) > 50 {
-			displayName = string(runes[:47]) + "..."
-		}
-
-		fmt.Printf("%s  %s%s  %s\n", sizeStr, unitStr, padding, displayName)
+		fmt.Printf("%s  %s%s  %-*s  %s\n", sizeStr, unitStr, padding, typeColWidth, item.Type, item.Name)
 	}
 
 	fmt.Println(strings.Repeat("-", 80))
