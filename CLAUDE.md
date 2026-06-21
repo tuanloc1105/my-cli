@@ -8,22 +8,21 @@
 - Prefer `context-mode` MCP for large command output, broad searches, logs, generated analysis, and web fetches. Do not use raw `curl` or `wget`.
 - Prefer Serena symbolic retrieval for Go source structure before broad source-file reads.
 - For repo edits, read current files first and keep changes surgical. Do not revert unrelated user changes.
-- Before file-changing work, start through the repo's GSD workflow when available. Entry points: `/gsd:quick` for doc updates and small fixes, `/gsd:debug` for bug investigation, `/gsd:execute-phase` for planned phase work.
 - This repo has no top-level `go.mod`; run Go commands from the individual module directory unless using an explicit loop.
 
 ## Project Map
 
 This is a collection of six standalone Go CLI tools plus one shared module. Each tool has its own module and builds independently.
 
-| Area | Purpose | Read first |
-| --- | --- | --- |
-| `api-stress-test/` | HTTP load/stress tester. Current active project focus is high-concurrency correctness and performance. | `api-stress-test/cmd/root.go`, then `docs/agent/api-stress-test.md` |
-| `case-converter/` | Text case conversion CLI. | `case-converter/main.go` |
-| `check-folder-size/` | Directory size analyzer with terminal and JSON output. | `check-folder-size/cmd/root.go`, `check-folder-size/internal/scanner/scanner.go` |
-| `find-content/` | Text search CLI with regex/plain, multiline, filtering, and listing modes. | `find-content/main.go`, `find-content/searcher.go` |
-| `find-everything/` | File finder with pattern, size, type, progress, and large-result handling. | `find-everything/cmd/root.go`, `find-everything/internal/finder/finder.go` |
-| `replace-text/` | Find/replace CLI with binary checks, optional backups, and atomic writes. | `replace-text/main.go` |
-| `common-module/` | Shared utilities used by `case-converter`, `check-folder-size`, and `find-everything`. | `common-module/utils/` |
+| Area                   | Purpose                                                                                                | Read first                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `api-stress-test/`   | HTTP load/stress tester. Current active project focus is high-concurrency correctness and performance. | `api-stress-test/cmd/root.go`, then `docs/agent/api-stress-test.md`              |
+| `case-converter/`    | Text case conversion CLI.                                                                              | `case-converter/main.go`                                                           |
+| `check-folder-size/` | Directory size analyzer with terminal and JSON output.                                                 | `check-folder-size/cmd/root.go`, `check-folder-size/internal/scanner/scanner.go` |
+| `find-content/`      | Text search CLI with regex/plain, multiline, filtering, and listing modes.                             | `find-content/main.go`, `find-content/searcher.go`                               |
+| `find-everything/`   | File finder with pattern, size, type, progress, and large-result handling.                             | `find-everything/cmd/root.go`, `find-everything/internal/finder/finder.go`       |
+| `replace-text/`      | Find/replace CLI with binary checks, optional backups, and atomic writes.                              | `replace-text/main.go`                                                             |
+| `common-module/`     | Shared utilities used by `case-converter`, `check-folder-size`, and `find-everything`.           | `common-module/utils/`                                                             |
 
 For detailed package routing, read `docs/agent/project-map.md`.
 
